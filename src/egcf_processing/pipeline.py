@@ -10,9 +10,15 @@ from egcf_processing import aggregate, combine, cycles, discovery, reader, rga_s
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTLE_OFFSET_S = 60.0
+DEFAULT_OUTPUT_FORMAT = "parquet"
 
 
-def run(raw_dir: Path, out_dir: Path, settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S) -> dict:
+def run(
+    raw_dir: Path,
+    out_dir: Path,
+    settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
+    output_format: str = DEFAULT_OUTPUT_FORMAT,
+) -> dict:
     files = discovery.find_gems_files(raw_dir)
     logger.info("found %d gems_*.txt file(s) under %s", len(files), raw_dir)
 
@@ -20,7 +26,7 @@ def run(raw_dir: Path, out_dir: Path, settle_offset_s: float = DEFAULT_SETTLE_OF
     logger.info("parsed %d record(s)", len(records))
 
     tables = combine.build_tables(records)
-    written = combine.write_tables(tables, out_dir)
+    written = combine.write_tables(tables, out_dir, output_format)
     for name, path in written.items():
         logger.info("wrote %s (%d rows) -> %s", name, tables[name].height, path)
 
@@ -37,10 +43,8 @@ def run(raw_dir: Path, out_dir: Path, settle_offset_s: float = DEFAULT_SETTLE_OF
     layer_b = aggregate.aggregate_onto_windows(scan_windows, tables["rga"], tables["scalup"], tables["status"])
     layer_c = aggregate.aggregate_onto_windows(chamber_windows, tables["rga"], tables["scalup"], tables["status"])
 
-    scans_path = out_dir / "egcf_rga_scans.parquet"
-    cycles_path = out_dir / "egcf_chamber_cycles.parquet"
-    layer_b.write_parquet(scans_path)
-    layer_c.write_parquet(cycles_path)
+    scans_path = combine.write_df(layer_b, out_dir, "egcf_rga_scans", output_format)
+    cycles_path = combine.write_df(layer_c, out_dir, "egcf_chamber_cycles", output_format)
     logger.info("wrote rga_scans (%d rows) -> %s", layer_b.height, scans_path)
     logger.info("wrote chamber_cycles (%d rows) -> %s", layer_c.height, cycles_path)
 

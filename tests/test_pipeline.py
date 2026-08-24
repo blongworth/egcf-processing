@@ -52,3 +52,19 @@ def test_end_to_end_pipeline(tmp_path):
     rga_scans = pl.read_parquet(out_dir / "egcf_rga_scans.parquet")
     assert rga_scans.height == 2
     assert rga_scans["mass_2_avg"].to_list() == [10.0, 11.0]
+
+
+def test_end_to_end_pipeline_csv_format(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(FILE_1)
+
+    out_dir = tmp_path / "processed"
+    run(raw_dir, out_dir, settle_offset_s=0, output_format="csv")
+
+    for name in ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]:
+        assert (out_dir / f"{name}.csv").exists()
+        assert not (out_dir / f"{name}.parquet").exists()
+
+    chamber_cycles = pl.read_csv(out_dir / "egcf_chamber_cycles.csv")
+    assert chamber_cycles["elapsed_time"].to_list() == [0.0]

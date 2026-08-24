@@ -65,11 +65,25 @@ def build_tables(records: list[dict]) -> dict[str, pl.DataFrame]:
     return tables
 
 
-def write_tables(tables: dict[str, pl.DataFrame], out_dir: Path) -> dict[str, Path]:
+def write_df(df: pl.DataFrame, out_dir: Path, name: str, output_format: str = "parquet") -> Path:
+    """Write a table to out_dir/{name}.{ext} in the given format ("parquet" or "csv").
+
+    CSV has no duration type, so any Duration column (elapsed_time) is
+    converted to whole seconds (float) for the CSV output only -- the
+    parquet output keeps the native Duration dtype.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    written = {}
-    for name, df in tables.items():
+    if output_format == "csv":
+        path = out_dir / f"{name}.csv"
+        duration_cols = [c for c, dt in zip(df.columns, df.dtypes) if dt.base_type() == pl.Duration]
+        if duration_cols:
+            df = df.with_columns((pl.col(c).dt.total_microseconds() / 1_000_000).alias(c) for c in duration_cols)
+        df.write_csv(path)
+    else:
         path = out_dir / f"{name}.parquet"
         df.write_parquet(path)
-        written[name] = path
-    return written
+    return path
+
+
+def write_tables(tables: dict[str, pl.DataFrame], out_dir: Path, output_format: str = "parquet") -> dict[str, Path]:
+    return {name: write_df(df, out_dir, name, output_format) for name, df in tables.items()}

@@ -1,6 +1,8 @@
+from datetime import datetime, timedelta
+
 import polars as pl
 
-from egcf_processing.combine import STATUS_SCHEMA, build_tables, write_tables
+from egcf_processing.combine import STATUS_SCHEMA, build_tables, write_df, write_tables
 from egcf_processing.lines import parse_line
 
 LINES = [
@@ -37,4 +39,24 @@ def test_write_tables_creates_parquet_files(tmp_path):
     assert set(written) == {"rga", "valve", "scalup", "status"}
     for name, path in written.items():
         assert path.exists()
+        assert path.suffix == ".parquet"
         assert pl.read_parquet(path).height == tables[name].height
+
+
+def test_write_tables_csv_format(tmp_path):
+    tables = build_tables(_records())
+    written = write_tables(tables, tmp_path, output_format="csv")
+    for name, path in written.items():
+        assert path.exists()
+        assert path.suffix == ".csv"
+        assert pl.read_csv(path).height == tables[name].height
+
+
+def test_write_df_csv_converts_duration_to_seconds(tmp_path):
+    df = pl.DataFrame(
+        {"timestamp": [datetime(2026, 1, 1)], "elapsed_time": [timedelta(seconds=90)]},
+        schema={"timestamp": pl.Datetime, "elapsed_time": pl.Duration},
+    )
+    path = write_df(df, tmp_path, "cycles", output_format="csv")
+    result = pl.read_csv(path)
+    assert result["elapsed_time"][0] == 90.0
