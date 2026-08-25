@@ -108,12 +108,42 @@ window-boundary function instead and call the same aggregator.
   empty (e.g. `status.parquet` is currently always 0 rows) — those columns are null, not absent. If
   you add a new source table, preserve this "schema present even when empty" behavior.
 
+## Dashboard
+
+`dashboard.py` (root shim, mirrors `main.py`) runs a Streamlit app defined in
+`src/egcf_processing/dashboard.py`. It's a **read-only viewer** over an
+already-processed `data/processed`-style directory (parquet, falling back to
+csv per table if no parquet exists) — it has no control to trigger a
+pipeline run itself, by design. Three tabs: Status (turbo speed/power/temp,
+plus total pressure only if `status.parquet` has any non-null
+`raw_total_pressure_current` — currently always empty against real data, so
+this is normally a "no data" message, not a bug), Measurements (full RGA
+time series, RGA-cycle- and chamber-cycle-averaged mass data, and scalup
+sonde data, all with a raw/Amps/Torr unit toggle reusing `aggregate.py`'s
+conversion constants), and Experiment Data (per-experiment C1-vs-C2
+comparison against elapsed time, with an RGA-cycle/chamber-cycle grain
+toggle). The status tab's "current" plot is deliberately `turbo_power_w` —
+there's no field literally named "current" in `STATUS_SCHEMA` besides the
+pressure ion current, which already gets its own plot; this was an explicit
+user choice, not a guess.
+
+Data-loading/transform helpers (`load_table`, `with_elapsed_time_s`,
+`discover_masses`, `rga_current_to_unit`, `melt_mass_columns`) are kept free
+of Streamlit calls so `tests/test_dashboard.py` can exercise them directly;
+only `render_*`/`main` touch `st`. When testing interactive behavior by hand
+instead of a browser, `streamlit.testing.v1.AppTest` runs the app headlessly
+and surfaces exceptions from bad widget-state interactions (e.g. a selectbox
+key reused across tables backed by different-typed columns) — this caught a
+real dtype-comparison bug during development that a plain `streamlit run` +
+manual click-through likely wouldn't have (this environment has no browser).
+
 ## Development
 
 ```
-uv sync                 # install deps (polars, pytest dev group)
+uv sync                 # install deps (polars, pytest dev group, streamlit, plotly)
 uv run pytest -q        # run the test suite
 uv run main.py <raw_dir> --out-dir <out_dir> [--settle-offset-s 60] [--format parquet|csv]
+uv run streamlit run dashboard.py   # launch the dashboard
 ```
 
 Test data lives in `data/raw/lander/egcf_lander_test_data_2026-08-24/` (gitignored, local only).
