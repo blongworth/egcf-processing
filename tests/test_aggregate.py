@@ -91,11 +91,34 @@ def test_status_fields_and_total_pressure_conversion():
         ],
         schema=STATUS_SCHEMA,
     )
-    result = aggregate_onto_windows(windows, _empty(RGA_SCHEMA), _empty(SCALUP_SCHEMA), status)
+    result = aggregate_onto_windows(
+        windows, _empty(RGA_SCHEMA), _empty(SCALUP_SCHEMA), status, total_pressure_sensitivity_a_per_torr=2e-4
+    )
     assert result["turbo_speed_hz"][0] == 1200.0
     assert result["turbo_power_w"][0] == 50.0
     assert result["water_pump_rpm"][0] == 8760.0
     assert result["total_pressure_amps"][0] == 2000.0 * 1e-16
+    assert result["total_pressure_torr"][0] == (2000.0 * 1e-16) / 2e-4
+
+
+def test_rga_mass_amps_and_torr_conversion():
+    windows = _windows([(0, 10, "C1", 1, 0)])
+    rga = pl.DataFrame(
+        [
+            {"ts": _ts(1), "mass": 2, "current": 1000.0},
+            {"ts": _ts(2), "mass": 28, "current": 2000.0},
+        ],
+        schema=RGA_SCHEMA,
+    )
+    result = aggregate_onto_windows(
+        windows, rga, _empty(SCALUP_SCHEMA), _empty(STATUS_SCHEMA), partial_pressure_sensitivity_a_per_torr=2e-4
+    )
+    assert result["mass_2_avg"][0] == 1000.0
+    assert result["mass_2_amps"][0] == 1000.0 * 1e-16
+    assert result["mass_2_torr"][0] == (1000.0 * 1e-16) / 2e-4
+    assert result["mass_28_avg"][0] == 2000.0
+    assert result["mass_28_amps"][0] == 2000.0 * 1e-16
+    assert result["mass_28_torr"][0] == (2000.0 * 1e-16) / 2e-4
 
 
 def test_all_empty_sources_produce_null_schema_present_columns():
