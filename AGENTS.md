@@ -21,8 +21,8 @@ Always check actual sample files before assuming the README's format holds.
 ```
 src/egcf_processing/
   lines.py        # parse_line(payload) -> dict|None -- the core per-line grammar
-  discovery.py     # find gems_*.txt files, parse rotation ts from filename, skip 0-byte files
-  reader.py        # read files in order, concatenate parsed records
+  discovery.py     # find gems_*.txt + surface_*_lander.log files, parse rotation ts, skip 0-byte
+  reader.py        # read files in order (dispatch by filename), concatenate parsed records
   combine.py       # Layer A: build + write status/rga/scalup/valve tables
   rga_scans.py     # Layer B window boundaries: RGA scan-cycle detection
   cycles.py        # Layer C window boundaries: chamber-cycle + experiment numbering
@@ -34,10 +34,34 @@ tests/             # one test file per module above, plus test_pipeline.py (end-
 data/              # gitignored -- raw logs and processed output live here, never committed
 ```
 
+## Two raw sources, one pipeline
+
+`raw_dir` may contain `gems_*.txt` files (SD-card recovery, the original source), `surface_*_lander.log`
+files (near-real-time telemetry relayed to a surface unit while the lander is still deployed), or both
+mixed under arbitrary subdirectories — `discovery.find_all_files()` `rglob`s for both and merges them
+into one file list ordered by each file's own rotation timestamp (embedded in its filename). `reader.read_file`
+dispatches on the `surface_` filename prefix: gems lines are the bare payload; surface lines wrap the
+*same* payload grammar in a `<surface_receipt_ts> <payload>` envelope (plus a `# ...` header, per
+`surface-lander-log-v1`). The surface receipt timestamp is discarded, not treated as `ts` — every downstream
+timeseries is keyed on the lander-embedded timestamp `parse_line` already extracts from the payload itself,
+so gems and surface records are directly comparable/mergeable once parsed.
+
+The surface log ships as a *pair* of files per rotation, `surface_<ts>_lander.log` and
+`surface_<ts>_events.log`; only `_lander.log` is in scope. `_events.log` has a 3-field format
+(`iso8601 direction payload`, e.g. `RX_CONSOLE VSTAT` / `TX_LANDER VSTAT`) recording console/lander
+comms traffic, not measurements — it never contains an R:/V:/P:/!: payload in the real test corpus, so
+`find_surface_files` excludes it by not matching the `_lander.log` glob (same exclusion-by-glob pattern
+`find_gems_files` uses for legacy formats), rather than by explicit filtering.
+
+**`!:` (status) occurs in the real surface corpus, unlike the gems corpus.** The "gems `!:` never
+occurs" gotcha below is specific to the SD-card recovery data; `data/raw/surface/egcf_surface_test_data_2026-08-25/`
+has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total_pressure_current`/
+`pump_rpm` do get populated when processing surface data, unlike the gems-only case described below.
+
 ## Pipeline model (three layers)
 
-1. **Layer A (raw combined)** — every `gems_*.txt` file parsed and concatenated by tag into
-   `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`).
+1. **Layer A (raw combined)** — every raw file (gems + surface, see above) parsed and concatenated by
+   tag into `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`).
    No aggregation. Written first; every later stage reads from these, not from raw files again.
 2. **Layer B (`egcf_rga_scans`)** — one row per RGA mass-scan cycle (~10s pass through the
    configured mass list). Scan boundaries are detected from the data itself (a
@@ -65,8 +89,9 @@ window-boundary function instead and call the same aggregator.
   that are correct, not a bug.
 - **`P:` has two field-count eras**, both still in use in real data: 6 fields (no `pressure_mbar`)
   and 7 fields (matches the README). `lines.py` branches on field count, not on date.
-- **`!:` (status) never occurs in the real test corpus**, nor do any of the README's other
-  untimestamped tags (`TS,`, `TP,`, `PS,`, `VS,`, `S,`, `CFG,`, `ST,`, `RE,`, `OK,`/`ACK,`/`DONE,`/`ERR,`).
+- **`!:` (status) never occurs in the real gems (SD-card) test corpus** — it does occur in the surface
+  corpus, see above. None of the README's other untimestamped tags (`TS,`, `TP,`, `PS,`, `VS,`, `S,`,
+  `CFG,`, `ST,`, `RE,`, `OK,`/`ACK,`/`DONE,`/`ERR,`) occur in either corpus.
   Per explicit user direction, `turbo_speed_hz`, `turbo_power_w`, `total_pressure_amps`, and
   `water_pump_rpm` in Layers B/C are sourced **only** from the README-documented `!:` detailed-status
   row — not from `PM:`, an undocumented but real, timestamped pump-telemetry tag also present in the
@@ -146,10 +171,11 @@ uv run main.py <raw_dir> --out-dir <out_dir> [--settle-offset-s 60] [--format pa
 uv run streamlit run dashboard.py   # launch the dashboard
 ```
 
-Test data lives in `data/raw/lander/egcf_lander_test_data_2026-08-24/` (gitignored, local only).
-It's real bench-test data with a compressed ~30s chamber-toggle cadence, not the production ~15 min
-— the default `--settle-offset-s 60` will correctly drop most cycles as too-short against it; use a
-smaller value (e.g. `5`) when validating against this specific dataset.
+Test data lives in `data/raw/lander/egcf_lander_test_data_2026-08-24/` (gems SD-card format) and
+`data/raw/surface/egcf_surface_test_data_2026-08-25/` (surface telemetry format), both gitignored,
+local only. Both are real bench-test data with a compressed ~30s chamber-toggle cadence, not the
+production ~15 min — the default `--settle-offset-s 60` will correctly drop most cycles as
+too-short against them; use a smaller value (e.g. `5`) when validating against these datasets.
 
 No linter/formatter is configured yet. Match the existing style (no comments unless something is
 genuinely non-obvious, explicit polars schemas, functions over classes).

@@ -23,8 +23,8 @@ def run(
     partial_pressure_sensitivity_a_per_torr: float = DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     total_pressure_sensitivity_a_per_torr: float = DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
 ) -> dict:
-    files = discovery.find_gems_files(raw_dir)
-    logger.info("found %d gems_*.txt file(s) under %s", len(files), raw_dir)
+    files = discovery.find_all_files(raw_dir)
+    logger.info("found %d gems_*.txt/surface_*_lander.log file(s) under %s", len(files), raw_dir)
 
     records = reader.read_all(files)
     logger.info("parsed %d record(s)", len(records))

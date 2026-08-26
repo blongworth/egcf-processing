@@ -27,6 +27,41 @@ FILE_2 = "\n".join(
 )
 
 
+def test_end_to_end_pipeline_merges_gems_and_surface_sources(tmp_path):
+    raw_dir = tmp_path / "raw"
+    (raw_dir / "lander").mkdir(parents=True)
+    (raw_dir / "surface").mkdir(parents=True)
+    (raw_dir / "lander" / "gems_2026-01-01-00-00.txt").write_text(FILE_1)
+    (raw_dir / "surface" / "surface_2026-01-01-04-00_lander.log").write_text(
+        "\n".join(
+            [
+                "# surface-lander-log-v1",
+                "# fields: iso8601 payload",
+                "2026-01-01T04:00:01Z V:2026-01-01T04:00:00Z,C1,Fl",
+                "2026-01-01T04:00:06Z V:2026-01-01T04:00:05Z,C2,Fl",
+                "2026-01-01T04:00:11Z V:2026-01-01T04:00:10Z,C1,Re",
+                "2026-01-01T04:00:12Z R:2026-01-01T04:00:11Z,2,12",
+                "2026-01-01T04:00:13Z R:2026-01-01T04:00:12Z,15,22",
+                "2026-01-01T04:00:21Z V:2026-01-01T04:00:20Z,C2,Fl",
+            ]
+        )
+    )
+
+    out_dir = tmp_path / "processed"
+    stats = run(raw_dir, out_dir, settle_offset_s=0)
+
+    assert stats["n_files"] == 2
+    assert stats["cycle_stats"]["total_cycles"] == 3
+
+    chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
+    assert chamber_cycles["experiment_number"].to_list() == [1, 1, 2]
+    assert chamber_cycles["chamber"].to_list() == ["C1", "C2", "C1"]
+
+    rga = pl.read_parquet(out_dir / "rga.parquet")
+    assert rga.height == 6
+    assert rga["ts"].dt.hour().to_list() == [0, 0, 0, 0, 4, 4]
+
+
 def test_end_to_end_pipeline(tmp_path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
