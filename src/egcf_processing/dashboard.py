@@ -19,6 +19,7 @@ from egcf_processing.aggregate import (
     DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     RAW_CURRENT_AMPS_PER_COUNT,
 )
+from egcf_processing.combine import duration_cols_to_seconds
 
 TABLE_NAMES = ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]
 
@@ -255,7 +256,7 @@ def render_experiment_tab(
 
     st.download_button(
         "Download this slice as CSV",
-        exp_df.write_csv(),
+        duration_cols_to_seconds(exp_df).write_csv(),
         file_name=f"experiment_{experiment}_{key}.csv",
         mime="text/csv",
     )

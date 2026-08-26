@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from egcf_processing.combine import STATUS_SCHEMA, build_tables, write_df, write_tables
+from egcf_processing.combine import STATUS_SCHEMA, build_tables, duration_cols_to_seconds, write_df, write_tables
 from egcf_processing.lines import parse_line
 
 LINES = [
@@ -60,3 +60,18 @@ def test_write_df_csv_converts_duration_to_seconds(tmp_path):
     path = write_df(df, tmp_path, "cycles", output_format="csv")
     result = pl.read_csv(path)
     assert result["elapsed_time"][0] == 90.0
+
+
+def test_duration_cols_to_seconds_converts_and_leaves_others_untouched():
+    df = pl.DataFrame(
+        {"chamber": ["C1"], "elapsed_time": [timedelta(seconds=90)]},
+        schema={"chamber": pl.Utf8, "elapsed_time": pl.Duration},
+    )
+    result = duration_cols_to_seconds(df)
+    assert result["elapsed_time"][0] == 90.0
+    assert result["chamber"][0] == "C1"
+
+
+def test_duration_cols_to_seconds_noop_without_duration_column():
+    df = pl.DataFrame({"chamber": ["C1"]})
+    assert duration_cols_to_seconds(df).equals(df)

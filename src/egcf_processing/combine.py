@@ -65,20 +65,28 @@ def build_tables(records: list[dict]) -> dict[str, pl.DataFrame]:
     return tables
 
 
+def duration_cols_to_seconds(df: pl.DataFrame) -> pl.DataFrame:
+    """Convert any Duration column (elapsed_time) to whole seconds (float).
+
+    CSV has no duration type, so this must run before writing/exporting a
+    Duration-bearing table (e.g. egcf_chamber_cycles) to CSV.
+    """
+    duration_cols = [c for c, dt in zip(df.columns, df.dtypes) if dt.base_type() == pl.Duration]
+    if not duration_cols:
+        return df
+    return df.with_columns((pl.col(c).dt.total_microseconds() / 1_000_000).alias(c) for c in duration_cols)
+
+
 def write_df(df: pl.DataFrame, out_dir: Path, name: str, output_format: str = "parquet") -> Path:
     """Write a table to out_dir/{name}.{ext} in the given format ("parquet" or "csv").
 
-    CSV has no duration type, so any Duration column (elapsed_time) is
-    converted to whole seconds (float) for the CSV output only -- the
-    parquet output keeps the native Duration dtype.
+    The parquet output keeps the native Duration dtype; only the CSV output
+    goes through duration_cols_to_seconds.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     if output_format == "csv":
         path = out_dir / f"{name}.csv"
-        duration_cols = [c for c, dt in zip(df.columns, df.dtypes) if dt.base_type() == pl.Duration]
-        if duration_cols:
-            df = df.with_columns((pl.col(c).dt.total_microseconds() / 1_000_000).alias(c) for c in duration_cols)
-        df.write_csv(path)
+        duration_cols_to_seconds(df).write_csv(path)
     else:
         path = out_dir / f"{name}.parquet"
         df.write_parquet(path)

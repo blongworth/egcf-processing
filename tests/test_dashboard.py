@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import polars as pl
+from streamlit.testing.v1 import AppTest
 
 from egcf_processing.dashboard import (
     discover_masses,
@@ -8,6 +10,8 @@ from egcf_processing.dashboard import (
     rga_current_to_unit,
     with_elapsed_time_s,
 )
+
+DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "src" / "egcf_processing" / "dashboard.py"
 
 
 def test_load_table_prefers_parquet_over_csv(tmp_path):
@@ -58,3 +62,27 @@ def test_rga_current_to_unit():
     assert raw == 1000.0
     assert amps == 1000.0 * 1e-16
     assert torr == (1000.0 * 1e-16) / 2e-4
+
+
+def test_experiment_tab_download_button_handles_parquet_duration(tmp_path):
+    # Regression test: when egcf_chamber_cycles is loaded from parquet, elapsed_time
+    # keeps its native Duration dtype (with_elapsed_time_s only adds a derived
+    # elapsed_time_s float column alongside it) -- the download button's CSV export
+    # must convert it too, or polars raises ComputeError on the Duration column.
+    df = pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1)],
+            "chamber": ["C1"],
+            "experiment_number": [1],
+            "elapsed_time": [timedelta(seconds=90)],
+            "mass_2_avg": [10.0],
+        },
+        schema_overrides={"elapsed_time": pl.Duration},
+    )
+    df.write_parquet(tmp_path / "egcf_chamber_cycles.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value("Chamber cycle").run(timeout=60)
+    assert not at.exception
