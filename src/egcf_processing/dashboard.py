@@ -88,6 +88,87 @@ def rga_current_to_unit(current: pl.Expr, unit: str, sensitivity_a_per_torr: flo
     return amps / sensitivity_a_per_torr
 
 
+def rga_full_ratio_to_mass(rga: pl.DataFrame, masses: list[int], reference_mass: int = 40) -> pl.DataFrame:
+    """Ratio of each mass's raw current to reference_mass's, for the full (unaveraged) RGA table.
+
+    The RGA scans one mass at a time, so different masses never share an exact
+    timestamp -- each mass's readings are paired with the nearest-in-time
+    reference_mass reading (join_asof, "nearest") rather than an exact match.
+    The ratio is unit-invariant (raw counts, Amps, and Torr all share the same
+    linear scale per reading, which cancels out), so this always uses raw
+    current regardless of the unit selected elsewhere in the UI. Returns a
+    long dataframe (ts, mass, ratio); reference_mass is excluded from the
+    output, as are masses with no data or a zero reference reading.
+    """
+    schema = {"ts": pl.Datetime, "mass": pl.Int64, "ratio": pl.Float64}
+    reference = (
+        rga.filter(pl.col("mass") == reference_mass).select("ts", pl.col("current").alias("_ref_current")).sort("ts")
+    )
+    if reference.is_empty():
+        return pl.DataFrame(schema=schema)
+    frames = []
+    for m in masses:
+        if m == reference_mass:
+            continue
+        series = rga.filter(pl.col("mass") == m).select("ts", "current").sort("ts")
+        if series.is_empty():
+            continue
+        joined = series.join_asof(reference, on="ts", strategy="nearest").filter(pl.col("_ref_current") != 0)
+        if joined.is_empty():
+            continue
+        frames.append(
+            joined.with_columns((pl.col("current") / pl.col("_ref_current")).alias("ratio"), mass=pl.lit(m)).select(
+                "ts", "mass", "ratio"
+            )
+        )
+    return pl.concat(frames) if frames else pl.DataFrame(schema=schema)
+
+
+def rga_wide_ratio_to_mass(table: pl.DataFrame, masses: list[int], ts_col: str, reference_mass: int = 40) -> pl.DataFrame:
+    """Ratio of each mass's averaged current to reference_mass's, for a wide per-cycle table.
+
+    Always uses the raw *_avg columns since the ratio is unit-invariant (see
+    rga_full_ratio_to_mass). Returns a long dataframe (ts, mass, ratio);
+    reference_mass is excluded, as are masses with no data or a zero
+    reference reading.
+    """
+    schema = {"ts": pl.Datetime, "mass": pl.Int64, "ratio": pl.Float64}
+    ref_col = f"mass_{reference_mass}_avg"
+    if ref_col not in table.columns:
+        return pl.DataFrame(schema=schema)
+    frames = []
+    for m in masses:
+        if m == reference_mass:
+            continue
+        col = f"mass_{m}_avg"
+        if col not in table.columns:
+            continue
+        frame = (
+            table.select(
+                pl.col(ts_col).alias("ts"),
+                pl.when(pl.col(ref_col) != 0).then(pl.col(col) / pl.col(ref_col)).alias("ratio"),
+            )
+            .drop_nulls("ratio")
+            .with_columns(mass=pl.lit(m))
+        )
+        if not frame.is_empty():
+            frames.append(frame.select("ts", "mass", "ratio"))
+    return pl.concat(frames) if frames else pl.DataFrame(schema=schema)
+
+
+def _mass_trace(ts: pl.Series, y: pl.Series, mass: int, mode: str, color_map: dict[int, str]) -> go.Scatter:
+    color = color_map[mass]
+    return go.Scatter(x=ts, y=y, mode=mode, name=f"mass {mass}", line={"color": color}, marker={"color": color})
+
+
+def _mass_traces_from_long(long_df: pl.DataFrame, value_col: str, mode: str, color_map: dict[int, str]) -> list[go.Scatter]:
+    return [
+        _mass_trace(g["ts"], g[value_col], m, mode, color_map)
+        for m in sorted(long_df["mass"].unique().to_list())
+        for g in [long_df.filter(pl.col("mass") == m)]
+    ]
+
+
 def _empty_state(name: str) -> None:
     st.info(f"No {name} data available in this dataset.")
 
@@ -176,51 +257,57 @@ def render_measurements_tab(
     sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
 
     rga = tables["rga"]
-    scans_table = tables["egcf_rga_scans"]
     cycles_table = tables["egcf_chamber_cycles"]
+    have_full = rga is not None and not rga.is_empty()
+    have_cycles = cycles_table is not None and not cycles_table.is_empty()
+
     all_masses: set[int] = set()
-    if rga is not None and not rga.is_empty():
+    if have_full:
         all_masses.update(rga["mass"].unique().to_list())
-    for table in (scans_table, cycles_table):
-        if table is not None and not table.is_empty():
-            all_masses.update(discover_masses(table))
+    if have_cycles:
+        all_masses.update(discover_masses(cycles_table))
     color_map = mass_color_map(sorted(all_masses))
 
-    if rga is None or rga.is_empty():
+    if not have_full and not have_cycles:
         _empty_state("RGA")
     else:
-        masses = sorted(rga["mass"].unique().to_list())
-        selected = st.multiselect("Masses (full RGA data)", masses, default=masses, key="rga_full_masses")
-        filtered = rga.filter(pl.col("mass").is_in(selected)).with_columns(
-            rga_current_to_unit(pl.col("current"), unit, partial_pressure_sensitivity).alias("value")
-        )
-        traces = [
-            go.Scatter(x=g["ts"], y=g["value"], mode="lines", name=f"mass {m}", line={"color": color_map[m]})
-            for m in selected
-            for g in [filtered.filter(pl.col("mass") == m)]
-        ]
-        sections.append((f"Full RGA data ({unit})", traces, sci, True))
+        options = [label for label, available in [("Full RGA data", have_full), ("Chamber cycle averages", have_cycles)] if available]
+        data_source = st.radio("RGA data source", options, horizontal=True, key="rga_data_source")
 
-    for key, label in [("egcf_rga_scans", "RGA-cycle-averaged data"), ("egcf_chamber_cycles", "Chamber-cycle-averaged data")]:
-        table = tables[key]
-        if table is None or table.is_empty():
-            _empty_state(label)
-            continue
-        masses = discover_masses(table)
-        selected = st.multiselect(f"Masses ({label})", masses, default=masses, key=f"{key}_masses")
-        suffix = unit if unit != "raw" else "avg"
-        traces = [
-            go.Scatter(
-                x=table["timestamp"],
-                y=table[f"mass_{m}_{suffix}"],
-                mode="lines",
-                name=f"mass {m}",
-                line={"color": color_map[m]},
+        if data_source == "Full RGA data":
+            masses = sorted(rga["mass"].unique().to_list())
+            selected = st.multiselect("Masses (RGA data)", masses, default=masses, key="rga_masses")
+            filtered = rga.filter(pl.col("mass").is_in(selected)).with_columns(
+                rga_current_to_unit(pl.col("current"), unit, partial_pressure_sensitivity).alias("value")
             )
-            for m in selected
-            if f"mass_{m}_{suffix}" in table.columns
-        ]
-        sections.append((f"{label} ({unit})", traces, sci, True))
+            long_df = filtered.select(pl.col("ts"), pl.col("mass"), pl.col("value"))
+            traces = _mass_traces_from_long(long_df, "value", "lines", color_map)
+            sections.append((f"RGA data ({unit}, full)", traces, sci, True))
+
+            ratio_long = rga_full_ratio_to_mass(rga, selected)
+            if ratio_long.is_empty():
+                st.info("No mass 40 data available to compute mass ratios.")
+            else:
+                ratio_traces = _mass_traces_from_long(ratio_long, "ratio", "lines", color_map)
+                sections.append(("Masses / mass 40 (full)", ratio_traces, False, True))
+        else:
+            masses = discover_masses(cycles_table)
+            selected = st.multiselect("Masses (chamber cycle averages)", masses, default=masses, key="rga_masses")
+            suffix = unit if unit != "raw" else "avg"
+            long_df = cycles_table.select(
+                pl.col("timestamp").alias("ts"),
+                *[pl.col(f"mass_{m}_{suffix}").alias(str(m)) for m in selected if f"mass_{m}_{suffix}" in cycles_table.columns],
+            ).unpivot(index="ts", variable_name="mass", value_name="value")
+            long_df = long_df.with_columns(pl.col("mass").cast(pl.Int64))
+            traces = _mass_traces_from_long(long_df, "value", "markers", color_map)
+            sections.append((f"RGA data ({unit}, chamber-cycle-averaged)", traces, sci, True))
+
+            ratio_long = rga_wide_ratio_to_mass(cycles_table, selected, ts_col="timestamp")
+            if ratio_long.is_empty():
+                st.info("No mass 40 data available to compute mass ratios.")
+            else:
+                ratio_traces = _mass_traces_from_long(ratio_long, "ratio", "markers", color_map)
+                sections.append(("Masses / mass 40 (chamber-cycle-averaged)", ratio_traces, False, True))
 
     scalup = tables["scalup"]
     if scalup is None or scalup.is_empty():

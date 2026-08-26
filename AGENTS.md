@@ -142,19 +142,41 @@ csv per table if no parquet exists) — it has no control to trigger a
 pipeline run itself, by design. Three tabs: Status (turbo speed/power/temp,
 plus total pressure only if `status.parquet` has any non-null
 `raw_total_pressure_current` — currently always empty against real data, so
-this is normally a "no data" message, not a bug), Measurements (full RGA
-time series, RGA-cycle- and chamber-cycle-averaged mass data, and scalup
-sonde data, all with a raw/Amps/Torr unit toggle reusing `aggregate.py`'s
-conversion constants), and Experiment Data (per-experiment C1-vs-C2
-comparison against elapsed time, with an RGA-cycle/chamber-cycle grain
-toggle). The status tab's "current" plot is deliberately `turbo_power_w` —
-there's no field literally named "current" in `STATUS_SCHEMA` besides the
-pressure ion current, which already gets its own plot; this was an explicit
-user choice, not a guess.
+this is normally a "no data" message, not a bug), Measurements (RGA mass
+data plus scalup sonde data, all with a raw/Amps/Torr unit toggle reusing
+`aggregate.py`'s conversion constants), and Experiment Data (per-experiment
+C1-vs-C2 comparison against elapsed time, with an RGA-cycle/chamber-cycle
+grain toggle). The status tab's "current" plot is deliberately
+`turbo_power_w` — there's no field literally named "current" in
+`STATUS_SCHEMA` besides the pressure ion current, which already gets its own
+plot; this was an explicit user choice, not a guess.
+
+The Measurements tab's RGA panels are driven by one "RGA data source" radio
+(`Full RGA data` / `Chamber cycle averages`, only offering a source that's
+actually present in the loaded dataset) — there is deliberately no separate
+RGA-cycle-averaged panel; that grain is only exposed via the Experiment Data
+tab's own grain toggle. Full RGA data renders as lines; chamber-cycle
+averages render as points (`mode="markers"`), since each point is one
+already-averaged cycle rather than a continuous signal. Whichever source is
+selected also drives a second panel, "Masses / mass 40", showing every other
+mass's current ratioed to mass 40's — `rga_full_ratio_to_mass` pairs each
+mass's full-resolution reading with the *nearest-in-time* mass-40 reading
+(`join_asof`, since the RGA scans one mass at a time and different masses
+never share an exact timestamp), while `rga_wide_ratio_to_mass` divides
+same-row `mass_{m}_avg` columns directly for the already-aligned
+chamber-cycle table. Both ratio helpers always use raw counts regardless of
+the unit toggle, since a shared linear scale factor per reading cancels out
+of any ratio. Every per-mass trace across both RGA panels (and the ratio
+panel) is colored via `mass_color_map()`, built once from the union of
+masses across the raw `rga` and `egcf_chamber_cycles` tables so a given mass
+is the same color in every panel regardless of which subset a panel's own
+multiselect shows — and every RGA panel uses a log-scale y-axis, since ion
+currents span several orders of magnitude.
 
 Data-loading/transform helpers (`load_table`, `with_elapsed_time_s`,
-`discover_masses`, `rga_current_to_unit`, `melt_mass_columns`) are kept free
-of Streamlit calls so `tests/test_dashboard.py` can exercise them directly;
+`discover_masses`, `rga_current_to_unit`, `mass_color_map`,
+`rga_full_ratio_to_mass`, `rga_wide_ratio_to_mass`) are kept free of
+Streamlit calls so `tests/test_dashboard.py` can exercise them directly;
 only `render_*`/`main` touch `st`. When testing interactive behavior by hand
 instead of a browser, `streamlit.testing.v1.AppTest` runs the app headlessly
 and surfaces exceptions from bad widget-state interactions (e.g. a selectbox
