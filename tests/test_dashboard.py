@@ -7,6 +7,7 @@ from streamlit.testing.v1 import AppTest
 from egcf_processing.dashboard import (
     discover_masses,
     load_table,
+    mass_color_map,
     rga_current_to_unit,
     with_elapsed_time_s,
 )
@@ -62,6 +63,15 @@ def test_rga_current_to_unit():
     assert raw == 1000.0
     assert amps == 1000.0 * 1e-16
     assert torr == (1000.0 * 1e-16) / 2e-4
+
+
+def test_mass_color_map_is_stable_regardless_of_input_order():
+    assert mass_color_map([28, 2, 15]) == mass_color_map([2, 15, 28])
+
+
+def test_mass_color_map_gives_each_mass_its_own_color_within_a_palette_cycle():
+    colors = mass_color_map([2, 15, 16])
+    assert len(set(colors.values())) == 3
 
 
 def test_experiment_tab_download_button_handles_parquet_duration(tmp_path):

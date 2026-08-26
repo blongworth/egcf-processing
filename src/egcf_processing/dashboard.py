@@ -23,6 +23,8 @@ from egcf_processing.combine import duration_cols_to_seconds
 
 TABLE_NAMES = ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]
 
+_MASS_COLOR_PALETTE = px.colors.qualitative.Plotly
+
 _SCALUP_PANELS = [
     ("temp_degC", "Temperature (degC)"),
     ("sal_PSU", "Salinity (PSU)"),
@@ -65,6 +67,17 @@ def discover_masses(df: pl.DataFrame) -> list[int]:
     return sorted({int(c.split("_")[1]) for c in df.columns if c.startswith("mass_")})
 
 
+def mass_color_map(masses: list[int]) -> dict[int, str]:
+    """Assign each mass id a fixed color, keyed by its position in the ascending mass list.
+
+    This makes mass colors consistent across every RGA panel (full RGA data,
+    RGA-cycle-averaged, chamber-cycle-averaged) regardless of which subset of
+    masses is selected in any one panel's multiselect -- panel-local trace
+    order would otherwise give the same mass a different color in each panel.
+    """
+    return {m: _MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)] for i, m in enumerate(sorted(masses))}
+
+
 def rga_current_to_unit(current: pl.Expr, unit: str, sensitivity_a_per_torr: float) -> pl.Expr:
     """Convert a raw RGA ion-current expression to the requested display unit."""
     if unit == "raw":
@@ -79,22 +92,25 @@ def _empty_state(name: str) -> None:
     st.info(f"No {name} data available in this dataset.")
 
 
-def _render_linked_timeseries(sections: list[tuple[str, list[go.Scatter], bool]], title: str) -> None:
+def _render_linked_timeseries(sections: list[tuple[str, list[go.Scatter], bool, bool]], title: str) -> None:
     """Render one subplot per section, stacked with a shared, zoom/pan-linked time axis.
 
     Each section's third element requests scientific-notation y-axis ticks,
     for the Amps/Torr panels whose magnitudes (~1e-8 to 1e-16) are unreadable
-    in plain decimal.
+    in plain decimal. The fourth element requests a log-scale y-axis, for the
+    RGA mass-current panels whose values span several orders of magnitude.
     """
-    sections = [(label, traces, sci) for label, traces, sci in sections if traces]
+    sections = [(label, traces, sci, log_y) for label, traces, sci, log_y in sections if traces]
     if not sections:
         return
-    fig = make_subplots(rows=len(sections), cols=1, shared_xaxes=True, subplot_titles=[label for label, _, _ in sections])
-    for i, (_label, traces, sci) in enumerate(sections, start=1):
+    fig = make_subplots(rows=len(sections), cols=1, shared_xaxes=True, subplot_titles=[label for label, _, _, _ in sections])
+    for i, (_label, traces, sci, log_y) in enumerate(sections, start=1):
         for trace in traces:
             fig.add_trace(trace, row=i, col=1)
         if sci:
             fig.update_yaxes(exponentformat="e", row=i, col=1)
+        if log_y:
+            fig.update_yaxes(type="log", row=i, col=1)
     fig.update_xaxes(matches="x")
     fig.update_layout(height=250 * len(sections), title=title)
     st.plotly_chart(fig, width="stretch")
@@ -106,9 +122,19 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
         _empty_state("status")
         return
 
-    sections: list[tuple[str, list[go.Scatter], bool]] = [
-        ("Turbo speed (Hz)", [go.Scatter(x=status["ts"], y=status["turbo_speed_hz"], mode="lines", name="turbo_speed_hz")], False),
-        ("Turbo power (W)", [go.Scatter(x=status["ts"], y=status["turbo_power_w"], mode="lines", name="turbo_power_w")], False),
+    sections: list[tuple[str, list[go.Scatter], bool, bool]] = [
+        (
+            "Turbo speed (Hz)",
+            [go.Scatter(x=status["ts"], y=status["turbo_speed_hz"], mode="lines", name="turbo_speed_hz")],
+            False,
+            False,
+        ),
+        (
+            "Turbo power (W)",
+            [go.Scatter(x=status["ts"], y=status["turbo_power_w"], mode="lines", name="turbo_power_w")],
+            False,
+            False,
+        ),
     ]
 
     temp_cols = ["turbo_etemp_c", "turbo_btemp_c", "turbo_mtemp_c"]
@@ -120,7 +146,7 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
         for sensor in temp_cols
         for g in [temp_long.filter(pl.col("sensor") == sensor)]
     ]
-    sections.append(("Turbo temperatures (degC)", temp_traces, False))
+    sections.append(("Turbo temperatures (degC)", temp_traces, False, False))
 
     if status["raw_total_pressure_current"].drop_nulls().is_empty():
         st.info("No total pressure data available in this dataset.")
@@ -134,6 +160,7 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
                 "Total pressure (Torr)",
                 [go.Scatter(x=pressure["ts"], y=pressure["total_pressure_torr"], mode="lines", name="total_pressure_torr")],
                 True,
+                False,
             )
         )
 
@@ -146,9 +173,19 @@ def render_measurements_tab(
 ) -> None:
     unit = st.radio("Unit", ["raw", "amps", "torr"], horizontal=True, key="measurements_unit")
     sci = unit in ("amps", "torr")
-    sections: list[tuple[str, list[go.Scatter], bool]] = []
+    sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
 
     rga = tables["rga"]
+    scans_table = tables["egcf_rga_scans"]
+    cycles_table = tables["egcf_chamber_cycles"]
+    all_masses: set[int] = set()
+    if rga is not None and not rga.is_empty():
+        all_masses.update(rga["mass"].unique().to_list())
+    for table in (scans_table, cycles_table):
+        if table is not None and not table.is_empty():
+            all_masses.update(discover_masses(table))
+    color_map = mass_color_map(sorted(all_masses))
+
     if rga is None or rga.is_empty():
         _empty_state("RGA")
     else:
@@ -158,11 +195,11 @@ def render_measurements_tab(
             rga_current_to_unit(pl.col("current"), unit, partial_pressure_sensitivity).alias("value")
         )
         traces = [
-            go.Scatter(x=g["ts"], y=g["value"], mode="lines", name=f"mass {m}")
+            go.Scatter(x=g["ts"], y=g["value"], mode="lines", name=f"mass {m}", line={"color": color_map[m]})
             for m in selected
             for g in [filtered.filter(pl.col("mass") == m)]
         ]
-        sections.append((f"Full RGA data ({unit})", traces, sci))
+        sections.append((f"Full RGA data ({unit})", traces, sci, True))
 
     for key, label in [("egcf_rga_scans", "RGA-cycle-averaged data"), ("egcf_chamber_cycles", "Chamber-cycle-averaged data")]:
         table = tables[key]
@@ -173,11 +210,17 @@ def render_measurements_tab(
         selected = st.multiselect(f"Masses ({label})", masses, default=masses, key=f"{key}_masses")
         suffix = unit if unit != "raw" else "avg"
         traces = [
-            go.Scatter(x=table["timestamp"], y=table[f"mass_{m}_{suffix}"], mode="lines", name=f"mass {m}")
+            go.Scatter(
+                x=table["timestamp"],
+                y=table[f"mass_{m}_{suffix}"],
+                mode="lines",
+                name=f"mass {m}",
+                line={"color": color_map[m]},
+            )
             for m in selected
             if f"mass_{m}_{suffix}" in table.columns
         ]
-        sections.append((f"{label} ({unit})", traces, sci))
+        sections.append((f"{label} ({unit})", traces, sci, True))
 
     scalup = tables["scalup"]
     if scalup is None or scalup.is_empty():
@@ -187,7 +230,9 @@ def render_measurements_tab(
         for col, label in _SCALUP_PANELS:
             actual_col = cols_lower.get(col.lower())
             if actual_col is not None:
-                sections.append((label, [go.Scatter(x=scalup["ts"], y=scalup[actual_col], mode="lines", name=col)], False))
+                sections.append(
+                    (label, [go.Scatter(x=scalup["ts"], y=scalup[actual_col], mode="lines", name=col)], False, False)
+                )
 
     _render_linked_timeseries(sections, title="Measurements")
 
@@ -233,7 +278,8 @@ def render_experiment_tab(
     ]
     variable = st.selectbox("Variable", mass_options + other_options, key="experiment_variable")
 
-    if variable.startswith("mass_"):
+    is_mass_variable = variable.startswith("mass_")
+    if is_mass_variable:
         suffix = unit if unit != "raw" else "avg"
         col = f"{variable}_{suffix}"
         col_is_sci = suffix in ("amps", "torr")
@@ -252,6 +298,8 @@ def render_experiment_tab(
     )
     if col_is_sci:
         fig.update_yaxes(exponentformat="e")
+    if is_mass_variable:
+        fig.update_yaxes(type="log")
     st.plotly_chart(fig, width="stretch")
 
     st.download_button(

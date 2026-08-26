@@ -8,6 +8,7 @@ dependencies = [
     "plotly>=7.0.0",
     "polars>=1.9",
     "streamlit>=1.62.0",
+    "watchdog>=6.0.0",
 ]
 
 [project.scripts]
