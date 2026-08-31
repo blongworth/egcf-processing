@@ -145,11 +145,92 @@ plus total pressure only if `status.parquet` has any non-null
 this is normally a "no data" message, not a bug), Measurements (RGA mass
 data plus scalup sonde data, all with a raw/Amps/Torr unit toggle reusing
 `aggregate.py`'s conversion constants), and Experiment Data (per-experiment
-C1-vs-C2 comparison against elapsed time, with an RGA-cycle/chamber-cycle
-grain toggle). The status tab's "current" plot is deliberately
+C1-vs-C2 comparison of one RGA mass or other variable against elapsed time,
+in minutes). The status tab's "current" plot is deliberately
 `turbo_power_w` — there's no field literally named "current" in
 `STATUS_SCHEMA` besides the pressure ion current, which already gets its own
 plot; this was an explicit user choice, not a guess.
+
+The Experiment Data tab's own "Grain" radio (`Full data` / `Cycle averages`)
+picks between `_render_experiment_full_data` and
+`_render_experiment_cycle_averages` -- both gated purely on the raw `valve`
+table being present, since **both grains are computed live by the dashboard
+from raw tables**, never by reading the pipeline's precomputed
+`egcf_chamber_cycles.parquet`. This is deliberate: it lets the settling
+period be adjusted interactively without re-running `egcf-process`.
+
+Both grains share one "Settling time after valve switch (s)" slider
+(`key="settle_offset_s"`, same widget key in both render functions so the
+value persists across a grain switch, default `pipeline.DEFAULT_SETTLE_OFFSET_S`)
+-- this is the *same* time-based settle_offset_s the pipeline itself uses
+(cycles.chamber_cycle_windows), just recomputed live instead of fixed at
+`egcf-process` run time.
+
+`Cycle averages` computes chamber-cycle windows with the slider's value
+directly (`chamber_cycle_windows(valve, settle_offset_s=slider_value)`,
+exactly like the CLI would) and calls `aggregate.aggregate_onto_windows()` --
+the exact same function the pipeline uses to build `egcf_chamber_cycles` --
+against those windows, so its output has the identical schema pipeline
+output always has (mass_{m}_avg/amps/torr, scalup/status columns, all
+present even when a source table is empty or absent -- an absent raw table
+is passed in as an empty DataFrame with the right schema).
+
+`Full data` needs a different approach, because it must keep every reading
+visible (greyed out, not dropped) rather than trim the window boundary
+itself. It always computes windows with `settle_offset_s=0.0` -- **not**
+the slider value -- so `window_start` stays exactly the Re-transition
+timestamp regardless of the slider, and `attach_experiment_context()`
+(built on `aggregate.match_readings_to_windows()` for the join, promoted
+from a pipeline-private `_bucketize` to a public function specifically for
+dashboard reuse) flags each reading's own `settled_out` as
+`(reading_ts - window_start) < settle_offset_s` -- the slider value used
+only for this comparison, not for the window itself. Each row stays its
+own point (no averaging), and `elapsed_time` is computed from **its own
+timestamp** minus the experiment start (`reading_ts - exp_start_ts`), not
+copied from a per-cycle constant (that constant would put every reading in
+a cycle at the same elapsed time, collapsing them onto one x-position).
+`_render_experiment_plot()` renders settled-out points as a single grey
+(`#B0B0B0`) "dropped (settling)" trace instead of hiding them, while kept
+points still render per-chamber in their normal colors.
+
+`Cycle averages` also fits a rate for the selected variable: `linear_fit()`
+is a plain ordinary-least-squares slope/intercept over `(elapsed_time_min,
+value)` (pure Python, no numpy dependency added for it), computed
+per-chamber against the *currently selected experiment*'s points and drawn
+as a dashed same-colored "`{chamber} fit ({slope:.3g}/min)`" line on the
+main plot via `_render_experiment_plot()`'s `fits` param. A second chart,
+`_render_experiment_rates_plot()`, repeats that fit for *every* experiment
+(via `experiment_rates()`, grouping the full un-filtered `with_experiment`
+table by `(experiment_number, chamber)`) and plots the resulting per-chamber
+rate against each experiment's start time -- so a fouling/drift trend across
+the whole deployment is visible at a glance, not just within one experiment.
+Rates aren't restricted to non-negative or log-scale display (unlike the
+value plots) since a rate can be positive or negative (production vs.
+consumption). An (experiment, chamber) pair with fewer than 2 valid points
+is silently omitted from both the fit overlay and the rates chart (a
+one-point "fit" is undefined) rather than raising. `Full data` does not get
+a fit overlay -- fitting is deliberately scoped to cycle-averaged points,
+which are far less noisy than individual raw readings.
+
+Non-mass variables under `Full data` map onto raw columns with different
+names/shapes than `aggregate_onto_windows`'s output: `_SCALUP_PANELS`
+supplies the case-insensitive raw-scalup-column lookup (reusing the same
+trick as the Measurements tab's scalup panels), `_STATUS_DIRECT_RAW_COLS`
+renames `pump_rpm` to `water_pump_rpm` (the other two status fields are
+already same-named), and `total_pressure_amps`/`total_pressure_torr` are
+computed from `status.raw_total_pressure_current` via
+`RAW_CURRENT_AMPS_PER_COUNT` and the total-pressure-sensitivity sidebar
+control (which is why `render_experiment_tab` takes
+`total_pressure_sensitivity`, not `partial_pressure_sensitivity` — the
+latter is unused here since mass variables are always shown as a
+unit-invariant Argon ratio, never as an Amps/Torr value). Both grains show
+mass variables as Argon-normalized ratios (mass ÷ mass 40, via
+`mass_to_argon_ratio_expr` for the wide cycle-averaged table or
+`rga_full_ratio_to_mass`'s nearest-in-time join for the long raw table), on
+a log-scale y-axis, and always plot elapsed time in minutes on the x-axis.
+Mass 40 itself, and any raw/Amps/Torr unit choice for masses, are therefore
+not options here — the ratio is unit-invariant, and Argon has nothing to
+normalize against.
 
 The Measurements tab's RGA panels are driven by one "RGA data source" radio
 (`Full RGA data` / `Chamber cycle averages`, only offering a source that's
@@ -175,9 +256,11 @@ currents span several orders of magnitude.
 
 Data-loading/transform helpers (`load_table`, `with_elapsed_time_s`,
 `discover_masses`, `rga_current_to_unit`, `mass_color_map`,
-`rga_full_ratio_to_mass`, `rga_wide_ratio_to_mass`) are kept free of
-Streamlit calls so `tests/test_dashboard.py` can exercise them directly;
-only `render_*`/`main` touch `st`. When testing interactive behavior by hand
+`rga_full_ratio_to_mass`, `rga_wide_ratio_to_mass`, `mass_to_argon_ratio_expr`,
+`variable_value_expr`, `attach_experiment_context`, `linear_fit`,
+`experiment_rates`) are kept free of Streamlit calls so
+`tests/test_dashboard.py` can exercise them directly; only `render_*`/`main`
+touch `st`. When testing interactive behavior by hand
 instead of a browser, `streamlit.testing.v1.AppTest` runs the app headlessly
 and surfaces exceptions from bad widget-state interactions (e.g. a selectbox
 key reused across tables backed by different-typed columns) — this caught a

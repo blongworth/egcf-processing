@@ -33,17 +33,22 @@ DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR = 2e-4
 DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = 2e-4
 
 
-def _bucketize(readings: pl.DataFrame, windows: pl.DataFrame, ts_col: str = "ts") -> pl.DataFrame:
+def match_readings_to_windows(readings: pl.DataFrame, windows: pl.DataFrame, ts_col: str = "ts") -> pl.DataFrame:
     """Match each reading to the window whose [window_start, window_end) it falls in.
 
     join_asof(backward) finds the latest window_start at or before the
     reading's timestamp; the explicit upper-bound filter then excludes
-    readings that fall in a settle/flush gap or past the window's end.
+    readings that fall in a settle/flush gap or past the window's end. Every
+    column present on ``windows`` (window_start, window_end, and whatever
+    else the caller included -- e.g. chamber, experiment_number, elapsed_time)
+    is carried onto the matched rows, since join_asof keeps all right-side
+    columns; callers that only need window_start/window_end may ignore the
+    rest.
     """
     if windows.is_empty():
         return readings.clear().with_columns(window_start=pl.lit(None, dtype=pl.Datetime))
     matched = readings.sort(ts_col).join_asof(
-        windows.select(["window_start", "window_end"]).sort("window_start"),
+        windows.sort("window_start"),
         left_on=ts_col,
         right_on="window_start",
         strategy="backward",
@@ -62,7 +67,7 @@ def _aggregate_rga(
     windows: pl.DataFrame,
     partial_pressure_sensitivity_a_per_torr: float,
 ) -> pl.DataFrame:
-    matched = _bucketize(rga, windows)
+    matched = match_readings_to_windows(rga, windows)
     if matched.is_empty():
         return windows.select("window_start")
     grouped = matched.group_by(["window_start", "mass"]).agg(pl.col("current").mean().alias("current"))
@@ -78,7 +83,7 @@ def _aggregate_rga(
 
 
 def _aggregate_scalup(scalup: pl.DataFrame, windows: pl.DataFrame) -> pl.DataFrame:
-    matched = _bucketize(scalup, windows)
+    matched = match_readings_to_windows(scalup, windows)
     if matched.is_empty():
         return _empty_float_cols(windows, _SCALUP_COLS)
     return matched.group_by("window_start").agg(
@@ -95,7 +100,7 @@ def _aggregate_status(
     windows: pl.DataFrame,
     total_pressure_sensitivity_a_per_torr: float,
 ) -> pl.DataFrame:
-    matched = _bucketize(status, windows)
+    matched = match_readings_to_windows(status, windows)
     if matched.is_empty():
         return _empty_float_cols(windows, _STATUS_COLS)
     agg = matched.group_by("window_start").agg(

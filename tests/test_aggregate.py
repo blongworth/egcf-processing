@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from egcf_processing.aggregate import aggregate_onto_windows
+from egcf_processing.aggregate import aggregate_onto_windows, match_readings_to_windows
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA
 
 WINDOWS_SCHEMA = {
@@ -128,6 +128,28 @@ def test_all_empty_sources_produce_null_schema_present_columns():
     for col in ["total_pressure_amps", "temp_degC", "turbo_speed_hz", "turbo_power_w", "water_pump_rpm"]:
         assert col in result.columns
         assert result[col][0] is None
+
+
+def test_match_readings_to_windows_carries_all_window_columns():
+    windows = _windows([(10, 20, "C1", 1, 0), (20, 30, "C2", 1, 10)])
+    rga = pl.DataFrame(
+        [
+            {"ts": _ts(15), "mass": 2, "current": 1.0},
+            {"ts": _ts(25), "mass": 2, "current": 2.0},
+            {"ts": _ts(5), "mass": 2, "current": -1.0},  # before any window: dropped
+        ],
+        schema=RGA_SCHEMA,
+    )
+    matched = match_readings_to_windows(rga, windows)
+    assert matched.height == 2
+    assert matched["chamber"].to_list() == ["C1", "C2"]
+    assert matched["experiment_number"].to_list() == [1, 1]
+
+
+def test_match_readings_to_windows_empty_windows():
+    windows = _empty(WINDOWS_SCHEMA)
+    rga = pl.DataFrame([{"ts": _ts(1), "mass": 2, "current": 1.0}], schema=RGA_SCHEMA)
+    assert match_readings_to_windows(rga, windows).is_empty()
 
 
 def test_same_raw_data_different_window_grains():
