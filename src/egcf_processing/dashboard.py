@@ -805,7 +805,7 @@ def main() -> None:
     st.title("EGFC Lander Dashboard")
 
     st.sidebar.header("Data source")
-    data_dir_input = st.sidebar.text_input("Processed data directory", value="data/processed")
+    data_dir_input = st.sidebar.text_input("Processed data directory", value="data/processed/surface")
     if st.sidebar.button("Reload data"):
         st.cache_data.clear()
     partial_pressure_sensitivity = st.sidebar.number_input(
