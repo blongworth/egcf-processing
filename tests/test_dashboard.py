@@ -9,6 +9,7 @@ from egcf_processing.dashboard import (
     attach_experiment_context,
     discover_masses,
     experiment_rates,
+    experiment_start_times,
     linear_fit,
     load_table,
     mass_color_map,
@@ -209,6 +210,22 @@ def test_experiment_rates_empty_source_returns_empty_schema():
     assert result.columns == ["experiment_number", "chamber", "experiment_start", "rate"]
 
 
+def test_experiment_start_times_min_of_ts_minus_elapsed_per_experiment():
+    source = pl.DataFrame(
+        {
+            "experiment_number": [1, 1, 2],
+            "window_start": [
+                datetime(2026, 1, 1, 0, 1, 0),
+                datetime(2026, 1, 1, 0, 11, 0),
+                datetime(2026, 1, 2, 0, 5, 0),
+            ],
+            "elapsed_time": [timedelta(seconds=60), timedelta(seconds=660), timedelta(seconds=300)],
+        }
+    )
+    result = experiment_start_times(source, "window_start")
+    assert result == {1: datetime(2026, 1, 1, 0, 0, 0), 2: datetime(2026, 1, 2, 0, 0, 0)}
+
+
 def test_attach_experiment_context_uses_each_readings_own_timestamp():
     # Two readings inside the same cycle, at different times: their elapsed_time
     # must differ (each relative to its own ts), not both equal the window's
@@ -341,8 +358,40 @@ def test_experiment_tab_cycle_averages_shows_fit_and_rates_plot(tmp_path):
     assert len(charts) == 2
     main_spec = charts[0].proto.spec
     assert "fit (" in main_spec
+    assert "Started 2026-01-01 00:00:00" in main_spec
     rates_spec = charts[1].proto.spec
     assert "rate per experiment" in rates_spec
+
+
+def test_experiment_tab_full_data_grain_shows_experiment_start_subtitle(tmp_path):
+    valve_df = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, 0), datetime(2026, 1, 1, 0, 5, 0)],
+            "chamber": ["C1", "C2"],
+            "flush_state": ["Re", "Fl"],
+        }
+    )
+    valve_df.write_parquet(tmp_path / "valve.parquet")
+    rga_df = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 1, 0), datetime(2026, 1, 1, 0, 1, 10)],
+            "mass": [2, 40],
+            "current": [10.0, 100.0],
+        }
+    )
+    rga_df.write_parquet(tmp_path / "rga.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+
+    tab = at.tabs[2]
+    fig_spec = tab.get("plotly_chart")[0].proto.spec
+    assert "Started 2026-01-01 00:00:00" in fig_spec
+
+    exp_select = [s for s in tab.get("selectbox") if s.label == "Experiment"][0]
+    assert exp_select.options == ["1 (2026-01-01 00:00:00)"]
 
 
 def test_experiment_tab_cycle_averages_download_button_handles_duration(tmp_path):
@@ -388,6 +437,8 @@ def test_experiment_tab_cycle_averages_variable_options_and_settle_slider(tmp_pa
     ]
     assert [r.label for r in tab.get("radio")] == ["Grain"]
     assert [s.label for s in tab.get("slider")] == ["Settling time after valve switch (s)"]
+    exp_select = [s for s in tab.get("selectbox") if s.label == "Experiment"][0]
+    assert exp_select.options == ["1 (2026-01-01 00:00:00)"]
 
 
 def test_experiment_tab_full_data_grain_uses_per_reading_elapsed_time(tmp_path):

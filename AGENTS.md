@@ -212,6 +212,26 @@ one-point "fit" is undefined) rather than raising. `Full data` does not get
 a fit overlay -- fitting is deliberately scoped to cycle-averaged points,
 which are far less noisy than individual raw readings.
 
+The single-experiment plot's title carries the experiment's real start time
+as a `<br><sup>...</sup>` HTML subtitle (`Started YYYY-MM-DD HH:MM:SS`), and
+the "Experiment" selectbox itself shows that same start time on every option
+(`"{experiment_number} ({start:%Y-%m-%d %H:%M:%S})"` via `st.selectbox`'s
+`format_func` -- the selectbox's returned *value* is still the plain
+experiment-number string, only its on-screen label changes), so both grains
+must compute the *same* start time per experiment regardless of the settling
+slider. `experiment_start_times()` computes `(ts_col - elapsed_time).min()`
+grouped by `experiment_number` in one pass, returning a `dict[int, datetime]`
+both call sites use for the selectbox's `format_func` and (after picking one)
+the subtitle, rather than two separate computations. `Full data`'s windows
+are always settle_offset_s=0.0, so calling it with `ts_col="window_start"`
+is exact. `Cycle averages`' windows have the slider's settle_offset_s baked
+into `window_start` (`chamber_cycle_windows` sets
+`window_start = re_transition_ts + settle_offset_s`), so calling it with
+`ts_col="timestamp"` (window_start, renamed by `aggregate_onto_windows`)
+leaves a constant `+ settle_offset_s` bias in every returned value that must
+be subtracted back out explicitly -- confirmed to match `Full data`'s values
+exactly regardless of the slider position.
+
 Non-mass variables under `Full data` map onto raw columns with different
 names/shapes than `aggregate_onto_windows`'s output: `_SCALUP_PANELS`
 supplies the case-insensitive raw-scalup-column lookup (reusing the same
@@ -258,7 +278,7 @@ Data-loading/transform helpers (`load_table`, `with_elapsed_time_s`,
 `discover_masses`, `rga_current_to_unit`, `mass_color_map`,
 `rga_full_ratio_to_mass`, `rga_wide_ratio_to_mass`, `mass_to_argon_ratio_expr`,
 `variable_value_expr`, `attach_experiment_context`, `linear_fit`,
-`experiment_rates`) are kept free of Streamlit calls so
+`experiment_rates`, `experiment_start_times`) are kept free of Streamlit calls so
 `tests/test_dashboard.py` can exercise them directly; only `render_*`/`main`
 touch `st`. When testing interactive behavior by hand
 instead of a browser, `streamlit.testing.v1.AppTest` runs the app headlessly

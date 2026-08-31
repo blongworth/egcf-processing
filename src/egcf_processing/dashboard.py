@@ -6,6 +6,7 @@ can be unit tested directly; only the render_*/main functions touch `st`.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import plotly.express as px
@@ -261,6 +262,20 @@ def experiment_rates(source: pl.DataFrame, variable: str, is_mass_variable: bool
     return pl.DataFrame(rows, schema=schema).sort("experiment_start") if rows else pl.DataFrame(schema=schema)
 
 
+def experiment_start_times(source: pl.DataFrame, ts_col: str) -> dict[int, datetime]:
+    """Map each experiment_number in ``source`` to its real start time.
+
+    Computed as ``(ts_col - elapsed_time).min()`` per experiment, same as the
+    per-experiment subtitle -- ``source`` needs ``ts_col``, ``elapsed_time``
+    (Duration), and ``experiment_number`` columns. If ``ts_col`` already has a
+    settle offset baked in (e.g. Cycle averages' "timestamp", which is
+    window_start = re_transition_ts + settle_offset_s), the caller must
+    subtract that offset back out of the returned values themselves.
+    """
+    starts = source.group_by("experiment_number").agg((pl.col(ts_col) - pl.col("elapsed_time")).min().alias("start"))
+    return dict(zip(starts["experiment_number"].to_list(), starts["start"].to_list()))
+
+
 def attach_experiment_context(
     readings: pl.DataFrame,
     windows: pl.DataFrame,
@@ -486,9 +501,16 @@ def _render_experiment_full_data(
         st.info("No valid chamber cycles found in this dataset.")
         return
 
+    start_by_exp = experiment_start_times(windows, "window_start")
     experiments = sorted(windows["experiment_number"].unique().to_list())
-    experiment = st.selectbox("Experiment", [str(e) for e in experiments], key="experiment_number")
+    experiment = st.selectbox(
+        "Experiment",
+        [str(e) for e in experiments],
+        format_func=lambda e: f"{e} ({start_by_exp[int(e)]:%Y-%m-%d %H:%M:%S})",
+        key="experiment_number",
+    )
     exp_windows = windows.filter(pl.col("experiment_number") == int(experiment))
+    experiment_start = start_by_exp[int(experiment)]
 
     settle_offset_s = st.slider(
         "Settling time after valve switch (s)",
@@ -565,7 +587,9 @@ def _render_experiment_full_data(
         col_is_sci = True
         download_df, download_name = exp_status, "status"
 
-    _render_experiment_plot(plot_df, experiment, variable_label, col_is_sci, is_mass_variable, settled_out_col="settled_out")
+    _render_experiment_plot(
+        plot_df, experiment, variable_label, col_is_sci, is_mass_variable, experiment_start, settled_out_col="settled_out"
+    )
     st.download_button(
         "Download this slice as CSV",
         duration_cols_to_seconds(download_df).write_csv(),
@@ -609,9 +633,21 @@ def _render_experiment_cycle_averages(
         st.info("No rows with a known experiment_number in this dataset.")
         return
 
+    # "timestamp" is window_start, which has settle_offset_s baked in (unlike Full
+    # data's windows, computed with settle_offset_s=0.0) -- subtract it back out so
+    # these start times match Full data's exactly regardless of the slider.
+    start_by_exp = {
+        e: s - timedelta(seconds=settle_offset_s) for e, s in experiment_start_times(with_experiment, "timestamp").items()
+    }
     experiments = sorted(with_experiment["experiment_number"].unique().to_list())
-    experiment = st.selectbox("Experiment", [str(e) for e in experiments], key="experiment_number")
+    experiment = st.selectbox(
+        "Experiment",
+        [str(e) for e in experiments],
+        format_func=lambda e: f"{e} ({start_by_exp[int(e)]:%Y-%m-%d %H:%M:%S})",
+        key="experiment_number",
+    )
     exp_df = with_experiment.filter(pl.col("experiment_number").cast(pl.Utf8) == experiment)
+    experiment_start = start_by_exp[int(experiment)]
 
     all_masses = discover_masses(exp_df)
     has_argon = f"mass_{ARGON_MASS}_avg" in exp_df.columns
@@ -662,7 +698,7 @@ def _render_experiment_cycle_averages(
         if fit is not None:
             fits[chamber] = fit
 
-    _render_experiment_plot(plot_df, experiment, variable_label, col_is_sci, is_mass_variable, fits=fits)
+    _render_experiment_plot(plot_df, experiment, variable_label, col_is_sci, is_mass_variable, experiment_start, fits=fits)
     st.download_button(
         "Download this slice as CSV",
         duration_cols_to_seconds(exp_df).write_csv(),
@@ -683,6 +719,7 @@ def _render_experiment_plot(
     variable_label: str,
     col_is_sci: bool,
     is_mass_variable: bool,
+    experiment_start: datetime,
     settled_out_col: str | None = None,
     fits: dict[str, tuple[float, float]] | None = None,
 ) -> None:
@@ -728,7 +765,12 @@ def _render_experiment_plot(
                 line={"color": chamber_color.get(chamber, "black"), "dash": "dash"},
             )
         )
-    fig.update_layout(title=f"Experiment {experiment}: {variable_label} vs elapsed time (min)")
+    fig.update_layout(
+        title={
+            "text": f"Experiment {experiment}: {variable_label} vs elapsed time (min)"
+            f"<br><sup>Started {experiment_start:%Y-%m-%d %H:%M:%S}</sup>"
+        }
+    )
     fig.update_xaxes(title="Elapsed time (min)")
     if col_is_sci:
         fig.update_yaxes(exponentformat="e")
