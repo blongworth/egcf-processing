@@ -30,9 +30,37 @@ src/egcf_processing/
   pipeline.py      # orchestrates the above; run(raw_dir, out_dir, settle_offset_s, output_format)
   cli.py           # argparse entry point
 main.py            # thin shim -> egcf_processing.cli.main
-tests/             # one test file per module above, plus test_pipeline.py (end-to-end)
+tests/             # one test file per module above (including test_cli.py), plus test_pipeline.py (end-to-end)
+tests/test_golden.py    # end-to-end regression tests against checked-in fixtures (see below)
+tests/fixtures/    # gems_gold_standard.txt (input) + egcf_{chamber_cycles,rga_scans}_expected.csv (expected output)
 data/              # gitignored -- raw logs and processed output live here, never committed
 ```
+
+`tests/test_golden.py` runs the real pipeline (discovery through Layers B and C)
+against `tests/fixtures/gems_gold_standard.txt` -- one experiment, two 30s chamber
+cycles (C1 then C2), two RGA masses spread across three complete mass-scan cycles
+(two within C1, one within C2), one scalup reading -- small enough to verify
+entirely by hand -- and compares the resulting `egcf_chamber_cycles.csv` and
+`egcf_rga_scans.csv` against the checked-in `tests/fixtures/egcf_chamber_cycles_expected.csv`
+/ `egcf_rga_scans_expected.csv` (numeric columns via `pytest.approx`, since CSV
+float round-tripping isn't guaranteed byte-exact). Unlike the other end-to-end
+tests in `test_pipeline.py`, which hand-assemble raw text as inline Python strings
+and assert on individual computed values, this is a real on-disk input file and
+real on-disk expected-output files, so it also catches unintended CSV
+formatting/schema/column-order changes that inline value-assertions wouldn't. If
+you intentionally change output shape or values, regenerate the fixtures by
+running the pipeline against `gems_gold_standard.txt` and re-verifying the new
+numbers by hand before overwriting the expected CSVs -- never regenerate them by
+just accepting whatever the (possibly buggy) code produces.
+
+`tests/test_cli.py` covers `cli.py`'s argparse wiring specifically -- that each
+flag (`--settle-offset-s`, `--format`, `--partial-pressure-sensitivity`,
+`--total-pressure-sensitivity`) actually reaches `pipeline.run()` and changes
+its output accordingly, and that the argparse defaults match `pipeline`'s
+`DEFAULT_*` constants. This is functional (real `main()` calls against a
+tmp_path raw dir, real output files read back), not a mock of `pipeline.run`,
+consistent with the rest of the suite's preference for exercising real code
+over mocking.
 
 ## Two raw sources, one pipeline
 
