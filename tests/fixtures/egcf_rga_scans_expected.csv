@@ -1,4 +1,4 @@
 timestamp,experiment_number,elapsed_time,chamber,mass_2_avg,mass_2_amps,mass_2_torr,mass_28_avg,mass_28_amps,mass_28_torr,total_pressure_amps,total_pressure_torr,temp_degC,sal_PSU,pressure_mbar,oxygen_mgL,pH,turbo_speed_hz,turbo_power_w,water_pump_rpm
-2026-01-01T00:00:05.000000,1,0.0,C1,100.0,1e-14,5e-11,1000.0,1e-13,5e-10,,,20.0,30.0,1010.0,8.0,7.5,,,
+2026-01-01T00:00:05.000000,1,0.0,C1,100.0,1e-14,5e-11,1000.0,1e-13,5e-10,2e-13,1e-9,21.0,31.0,1010.0,8.5,7.6,1200.0,50.0,8760.0
 2026-01-01T00:00:20.000000,1,0.0,C1,200.0,2e-14,1e-10,2000.0,2e-13,1e-9,,,,,,,,,,
 2026-01-01T00:00:35.000000,1,30.0,C2,50.0,5e-15,2.5e-11,500.0,5e-14,2.5e-10,,,,,,,,,,

@@ -4,12 +4,20 @@ aggregation behavior is caught even if it doesn't break any of the more
 targeted unit tests.
 
 tests/fixtures/gems_gold_standard.txt is one experiment, two chamber cycles
-(C1 then C2, 30s each), with two RGA masses, one scalup reading, and enough
-RGA readings to form three complete mass-scan cycles (two within C1, one
-within C2) -- small enough to verify entirely by hand, but real gems_*.txt
-format end to end (not a hand-assembled DataFrame), exercising the full
-pipeline: discovery -> reader -> lines -> combine (Layer A) -> cycles/
-rga_scans + aggregate (Layers B and C).
+(C1 then C2, 30s each), with two RGA masses, one detailed !: status line, both
+real P: field-count eras (6-field and 7-field -- see AGENTS.md's "P: has two
+field-count eras" gotcha), and enough RGA readings to form three complete
+mass-scan cycles (two within C1, one within C2) -- small enough to verify
+entirely by hand, but real gems_*.txt format end to end (not a hand-assembled
+DataFrame), exercising the full pipeline: discovery -> reader -> lines ->
+combine (Layer A) -> cycles/rga_scans + aggregate (Layers B and C).
+
+Deliberately NOT included, since they don't produce output rows and are
+already covered by targeted rejection-path unit tests in test_lines.py: the
+old 4-field V: format, the undocumented PM: tag, and !:'s 2-field generic
+fallback (all real in the raw corpora, but out of scope by design -- adding
+them here would test skip-path behavior, not output correctness, and would
+make the by-hand verification harder to follow for no benefit).
 """
 
 from pathlib import Path

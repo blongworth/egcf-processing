@@ -39,8 +39,10 @@ data/              # gitignored -- raw logs and processed output live here, neve
 `tests/test_golden.py` runs the real pipeline (discovery through Layers B and C)
 against `tests/fixtures/gems_gold_standard.txt` -- one experiment, two 30s chamber
 cycles (C1 then C2), two RGA masses spread across three complete mass-scan cycles
-(two within C1, one within C2), one scalup reading -- small enough to verify
-entirely by hand -- and compares the resulting `egcf_chamber_cycles.csv` and
+(two within C1, one within C2), one detailed `!:` status line, and both real `P:`
+field-count eras (6-field and 7-field, both merged into the same window's scalup
+average) -- small enough to verify entirely by hand -- and compares the resulting
+`egcf_chamber_cycles.csv` and
 `egcf_rga_scans.csv` against the checked-in `tests/fixtures/egcf_chamber_cycles_expected.csv`
 / `egcf_rga_scans_expected.csv` (numeric columns via `pytest.approx`, since CSV
 float round-tripping isn't guaranteed byte-exact). Unlike the other end-to-end
