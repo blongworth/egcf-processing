@@ -191,6 +191,55 @@ def test_n2_denitrification_flux_from_mass_28_to_40_ratio():
     assert n2["output_value"][0] == pytest.approx(expected_slope * VOLUME_L / AREA_M2 * 60)
 
 
+def test_n2_argon_term_is_anchored_at_the_incubation_start_not_recomputed_per_cycle():
+    # The chamber is sealed for a whole experiment, so inert Ar has one fixed
+    # concentration: a constant N2/Ar ratio must give exactly zero N2 flux even
+    # while the chamber temperature drifts. Recomputing Ar per cycle would make
+    # this ~ -2%/degC of spurious apparent N2 change instead.
+    drifting = _cycles(
+        mass_28_avg=[100.0, 100.0],
+        mass_40_avg=[1000.0, 1000.0],
+        temp_degC=[10.0, 14.0],
+        sal_PSU=[32.0, 32.0],
+    )
+    n2 = compute_fluxes(drifting, VOLUME_L, AREA_M2).filter(pl.col("variable") == "n2_denitrification")
+    assert n2["slope_native_per_min"][0] == pytest.approx(0.0, abs=1e-12)
+
+    # And a real N2 change is scaled by the FIRST cycle's Ar, not the second's.
+    rising = _cycles(
+        mass_28_avg=[100.0, 110.0],
+        mass_40_avg=[1000.0, 1000.0],
+        temp_degC=[10.0, 14.0],
+        sal_PSU=[32.0, 32.0],
+    )
+    n2 = compute_fluxes(rising, VOLUME_L, AREA_M2).filter(pl.col("variable") == "n2_denitrification")
+    ar_at_start = ar_solubility_umol_kg(10.0, 32.0) * seawater_density_kg_per_l(10.0, 32.0)
+    assert n2["slope_native_per_min"][0] == pytest.approx((0.11 - 0.10) * ar_at_start)
+
+
+def test_n2_anchors_each_experiment_and_chamber_independently():
+    cycles = pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1, 0, m) for m in (0, 1, 0, 1)],
+            "experiment_number": [1, 1, 2, 2],
+            "elapsed_time": [timedelta(seconds=s) for s in (0, 60, 0, 60)],
+            "chamber": ["C1", "C1", "C1", "C1"],
+            "mass_28_avg": [100.0, 110.0, 100.0, 110.0],
+            "mass_40_avg": [1000.0, 1000.0, 1000.0, 1000.0],
+            # Experiment 2 was sealed in warmer water: less dissolved Ar, so the
+            # same ratio change is a smaller absolute N2 change.
+            "temp_degC": [10.0, 10.0, 20.0, 20.0],
+            "sal_PSU": [32.0, 32.0, 32.0, 32.0],
+        }
+    )
+    n2 = compute_fluxes(cycles, VOLUME_L, AREA_M2).filter(pl.col("variable") == "n2_denitrification")
+    by_exp = dict(zip(n2["experiment_number"].to_list(), n2["slope_native_per_min"].to_list()))
+    for exp, temp in [(1, 10.0), (2, 20.0)]:
+        ar = ar_solubility_umol_kg(temp, 32.0) * seawater_density_kg_per_l(temp, 32.0)
+        assert by_exp[exp] == pytest.approx((0.11 - 0.10) * ar)
+    assert by_exp[2] < by_exp[1]
+
+
 def test_n2_omitted_when_argon_mass_is_absent():
     cycles = _cycles(mass_28_avg=[100.0, 110.0], temp_degC=[10.0, 10.0], sal_PSU=[32.0, 32.0])
     fluxes = compute_fluxes(cycles, VOLUME_L, AREA_M2)

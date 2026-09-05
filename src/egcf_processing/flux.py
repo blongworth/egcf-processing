@@ -286,32 +286,38 @@ def _rate_rows(series: pl.DataFrame, variable: str, output_unit: str) -> list[di
     ]
 
 
-def _n2_dissolved_umol_l_column(cycles: pl.DataFrame, n2_ar_sensitivity_ratio: float) -> pl.Series:
-    """Dissolved [N2] (umol/L) from the raw mass-28/mass-40 ion-current ratio.
+def _with_n2_dissolved_umol_l(cycles: pl.DataFrame, n2_ar_sensitivity_ratio: float) -> pl.DataFrame:
+    """Add dissolved [N2] (umol/L) from the raw mass-28/mass-40 ion-current ratio.
 
-    [N2] = (I28/I40 / k) * Ar_solubility(T,S) * density(T,S), where k is the
-    instrument sensitivity ratio (see DEFAULT_N2_AR_SENSITIVITY_RATIO). Uses
-    the raw *_avg counts rather than *_torr so the RGA's approximate nominal
-    Faraday-cup sensitivity cancels in the ratio.
+    [N2] = (I28/I40 / k) * Ar_solubility(T0,S0) * density(T0,S0), where k is
+    the instrument sensitivity ratio (see DEFAULT_N2_AR_SENSITIVITY_RATIO).
+    Uses the raw *_avg counts rather than *_torr so the RGA's approximate
+    nominal Faraday-cup sensitivity cancels in the ratio.
 
-    Note this takes [Ar] to be the atmospheric equilibrium value at each
-    cycle's own T and S. Ar is biologically inert, so in a sealed chamber the
-    true [Ar] is fixed; recomputing it per cycle means chamber temperature
-    drift moves the Ar term (about -2%/degC) and shows up as apparent N2
-    change. That is negligible at the sub-0.1 degC/h drift most incubations
-    show, but not for one that swings degrees per hour -- check the temp_degC
-    rate rows before trusting an N2 flux from a thermally unstable incubation.
+    T0/S0 are the conditions at each incubation's **first** cycle, not each
+    cycle's own -- the chamber stays sealed for a whole experiment and is
+    flushed only between experiments, so the enclosed water is a closed
+    volume and inert Ar genuinely has one fixed concentration throughout.
+    Recomputing the Ar term per cycle would let chamber temperature drift
+    (Ar solubility moves about -2%/degC) masquerade as N2 production or
+    consumption. Salinity cannot change in a sealed chamber either, so
+    anchoring S also drops sonde noise out of the Ar term.
     """
-    temps = cycles["temp_degC"].to_list()
-    sals = cycles["sal_PSU"].to_list()
-    ratios = (cycles["mass_28_avg"] / cycles["mass_40_avg"]).to_list()
+    anchor = (
+        cycles.drop_nulls(["temp_degC", "sal_PSU"])
+        .sort("timestamp")
+        .group_by(["experiment_number", "chamber"])
+        .agg(pl.col("temp_degC").first().alias("_t0"), pl.col("sal_PSU").first().alias("_s0"))
+    )
+    joined = cycles.join(anchor, on=["experiment_number", "chamber"], how="left")
+    ratios = (joined["mass_28_avg"] / joined["mass_40_avg"]).to_list()
     values = [
-        (ratio / n2_ar_sensitivity_ratio) * ar_solubility_umol_kg(t, s) * seawater_density_kg_per_l(t, s)
-        if ratio is not None and t is not None and s is not None
+        (ratio / n2_ar_sensitivity_ratio) * ar_solubility_umol_kg(t0, s0) * seawater_density_kg_per_l(t0, s0)
+        if ratio is not None and t0 is not None and s0 is not None
         else None
-        for ratio, t, s in zip(ratios, temps, sals)
+        for ratio, t0, s0 in zip(ratios, joined["_t0"].to_list(), joined["_s0"].to_list())
     ]
-    return pl.Series("_n2_umol_l", values, dtype=pl.Float64)
+    return joined.with_columns(pl.Series("_n2_umol_l", values, dtype=pl.Float64)).drop("_t0", "_s0")
 
 
 def compute_fluxes(
@@ -349,9 +355,8 @@ def compute_fluxes(
         rows += _flux_rows(series, "h_ion", H_ION_UMOL_PER_MOL, chamber_volume_l, chamber_area_m2)
 
     if {"mass_28_avg", "mass_40_avg", "temp_degC", "sal_PSU"} <= set(cycles.columns):
-        n2 = cycles.filter(pl.col("mass_40_avg") != 0)
-        n2_col = _n2_dissolved_umol_l_column(n2, n2_ar_sensitivity_ratio)
-        series = concentration_series(n2.with_columns(n2_col), "_n2_umol_l")
+        n2 = _with_n2_dissolved_umol_l(cycles.filter(pl.col("mass_40_avg") != 0), n2_ar_sensitivity_ratio)
+        series = concentration_series(n2, "_n2_umol_l")
         rows += _flux_rows(series, "n2_denitrification", 1.0, chamber_volume_l, chamber_area_m2)
 
     if "temp_degC" in cycles.columns:

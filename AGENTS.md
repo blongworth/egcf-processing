@@ -153,14 +153,18 @@ means the row is absent from the output, never an error):
   1.0 means *uncalibrated* — sign and shape of the flux are right, magnitude is not, and
   `pipeline.run()` logs a warning when it's left there.
 
-  Second caveat, structural rather than a constant: `[Ar]` is taken as the atmospheric
-  equilibrium value at **each cycle's own T and S**. Ar is inert, so in a sealed chamber the
-  true `[Ar]` is fixed; recomputing it per cycle lets temperature drift move the Ar term
-  (≈ −2%/°C) and appear as N2 change. Negligible at the sub-0.1 °C/h drift most incubations in
-  the bench corpus show, but an incubation drifting degrees per hour will carry a spurious N2
-  signal — check the `temp_degC` rate row for the same `(experiment, chamber)` before trusting
-  its N2 flux. Whether to instead anchor `[Ar]` at each incubation's first cycle depends on the
-  chamber's real flush/seal semantics; it was left per-cycle rather than guessed at.
+  `[Ar]` is evaluated **once per incubation, at its first cycle's T and S** — not per cycle.
+  Per the project owner, a chamber stays sealed for a whole experiment and is flushed only
+  between experiments, so the enclosed water is a closed volume and inert Ar genuinely holds one
+  fixed concentration throughout; the alternating `Re`/`Fl` transitions within an experiment
+  select which chamber the RGA draws from, they don't re-flush the incubation. Recomputing the
+  Ar term per cycle would let chamber temperature drift (Ar solubility moves ≈ −2%/°C)
+  masquerade as N2 production or consumption. This is not hypothetical: against the real bench
+  corpus it moved most incubations 1–20% and **flipped the sign** of experiment 16, the only
+  warming one (+0.2 °C/h) and the one with the smallest real N2 signal. Salinity can't change in
+  a sealed chamber either, so anchoring S also keeps sonde noise out of the Ar term.
+  `_with_n2_dissolved_umol_l` does the anchoring per `(experiment_number, chamber)`; don't
+  "simplify" it back to a per-row expression.
 - **`temp_degC`** — reported as a **rate in °C/h, not a flux**, and not scaled by V/A. There's no
   mass/energy-conservation quantity for temperature without water density and specific heat
   capacity, which is out of scope. It rides in the same table (distinguished by `output_unit`) as
