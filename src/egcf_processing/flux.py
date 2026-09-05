@@ -28,10 +28,19 @@ import polars as pl
 O2_UMOL_PER_MG = 1000 / 32  # mg/L -> umol/L, O2 molar mass 32 g/mol
 H_ION_UMOL_PER_MOL = 1e6  # mol/L -> umol/L
 
-# Fixed approximation, not a full T/S equation of state -- see AGENTS.md.
-SEAWATER_DENSITY_KG_PER_L = 1.025
-
 MIN_PER_HOUR = 60.0
+
+# Ratio of the RGA's mass-28 sensitivity to its mass-40 sensitivity. The raw
+# ion-current ratio I28/I40 is NOT the molar N2/Ar ratio -- an RGA's
+# transmission and ionization cross-section differ per mass -- so N2:Ar
+# denitrification flux is only as accurate as this factor. 1.0 means
+# "uncalibrated": the flux keeps its sign and shape but its magnitude is off
+# by however far the true sensitivity ratio is from unity. Measure it with
+# n2_ar_sensitivity_from_standard() against air-equilibrated water at known
+# T/S and pass the result through the pipeline. In the real bench corpus the
+# raw I28/I40 runs ~45 where equilibrated seawater should read ~37, so the
+# real factor is materially different from 1.
+DEFAULT_N2_AR_SENSITIVITY_RATIO = 1.0
 
 _FLUX_SCHEMA = {
     "experiment_number": pl.Int64,
@@ -54,16 +63,44 @@ _SERIES_SCHEMA = {
     "n": pl.Int64,
 }
 
-# Hamme & Emerson (2004) Deep-Sea Research I 51:1517-1528, Table 4.
-_AR_SOLUBILITY_COEFFS = {
-    "A0": 2.79150,
-    "A1": 3.17609,
-    "A2": 4.13116,
-    "A3": 4.90379,
-    "B0": -6.96233e-3,
-    "B1": -7.66670e-3,
-    "B2": -1.16888e-2,
+# Hamme & Emerson (2004), Deep-Sea Research I 51:1517-1528, Table 4 --
+# verified against the paper, including its own published check values
+# (10 degC, S=35: Ar 13.4622, N2 500.885 umol/kg), which tests/test_flux.py
+# asserts directly. Valid 0-30 degC and distilled water through seawater, so
+# the full estuarine salinity range is in scope. Note the salinity dependence
+# is a Setchenow relation fit at only two salinities (~0 and ~35), so
+# intermediate estuarine salinities are interpolated rather than measured.
+_SOLUBILITY_COEFFS = {
+    "Ar": {
+        "A0": 2.79150,
+        "A1": 3.17609,
+        "A2": 4.13116,
+        "A3": 4.90379,
+        "B0": -6.96233e-3,
+        "B1": -7.66670e-3,
+        "B2": -1.16888e-2,
+    },
+    "N2": {
+        "A0": 6.42931,
+        "A1": 2.92704,
+        "A2": 4.32531,
+        "A3": 4.69149,
+        "B0": -7.44129e-3,
+        "B1": -8.02566e-3,
+        "B2": -1.46775e-2,
+    },
 }
+
+# UNESCO/EOS-80 one-atmosphere International Equation of State (Millero &
+# Poisson 1981), verified against the UNESCO Technical Paper in Marine
+# Science No. 44 p.22 check values, which tests/test_flux.py asserts. Used
+# instead of a fixed ~1.025 kg/L because that approximation is ~1.4% off at
+# S=15 and ~2.6% off in fresh water -- a real error in an estuarine setting,
+# where it feeds straight through to N2 flux magnitude.
+_EOS80_PURE = (999.842594, 6.793952e-2, -9.095290e-3, 1.001685e-4, -1.120083e-6, 6.536332e-9)
+_EOS80_A = (8.24493e-1, -4.0899e-3, 7.6438e-5, -8.2467e-7, 5.3875e-9)
+_EOS80_B = (-5.72466e-3, 1.0227e-4, -1.6546e-6)
+_EOS80_C = 4.8314e-4
 
 
 def linear_fit(x: list[float], y: list[float]) -> tuple[float, float] | None:
@@ -106,18 +143,22 @@ def ols_fit(x: list[float], y: list[float]) -> dict | None:
     return {"slope": slope, "intercept": intercept, "r2": r2, "n": n}
 
 
-def ar_solubility_umol_kg(temp_degc: float, sal_psu: float) -> float:
-    """Argon solubility (umol/kg) at 1 atm total pressure, moist air.
+def gas_solubility_umol_kg(gas: str, temp_degc: float, sal_psu: float) -> float:
+    """Ar or N2 solubility (umol/kg) in equilibrium with moist air at 1 atm total pressure.
 
-    Hamme & Emerson (2004), Deep-Sea Research I 51:1517-1528, Table 4.
-    NOTE: the coefficients above are transcribed from memory, not verified
-    against the primary source in this session -- treat n2_denitrification
-    flux as approximate until double-checked against the paper directly,
-    the same "approximate until verified" treatment AGENTS.md already gives
-    the RGA's nominal Faraday-cup sensitivity.
+    Hamme & Emerson (2004) Equation 1:
+        ln C = A0 + A1*Ts + A2*Ts^2 + A3*Ts^3 + S*(B0 + B1*Ts + B2*Ts^2)
+        Ts   = ln((298.15 - t) / (273.15 + t))
+    with t in degC and S the practical salinity (PSS).
+
+    "1 atm total pressure" is the reference the coefficients are fit to, so
+    this is the concentration the water would hold if last equilibrated with
+    the atmosphere at exactly 1013.25 mbar. Real barometric pressure varies a
+    few percent about that and scales the result nearly linearly; this
+    function does not correct for it.
     """
     ts = math.log((298.15 - temp_degc) / (273.15 + temp_degc))
-    c = _AR_SOLUBILITY_COEFFS
+    c = _SOLUBILITY_COEFFS[gas]
     ln_c = (
         c["A0"]
         + c["A1"] * ts
@@ -126,6 +167,41 @@ def ar_solubility_umol_kg(temp_degc: float, sal_psu: float) -> float:
         + sal_psu * (c["B0"] + c["B1"] * ts + c["B2"] * ts**2)
     )
     return math.exp(ln_c)
+
+
+def ar_solubility_umol_kg(temp_degc: float, sal_psu: float) -> float:
+    """Argon solubility (umol/kg); see gas_solubility_umol_kg."""
+    return gas_solubility_umol_kg("Ar", temp_degc, sal_psu)
+
+
+def seawater_density_kg_per_l(temp_degc: float, sal_psu: float) -> float:
+    """Seawater density (kg/L) at one atmosphere, UNESCO/EOS-80.
+
+    Converts the solubility functions' per-kg concentrations to the per-litre
+    basis the chamber volume is expressed in. Pressure (depth) is ignored --
+    at lander depths the compressibility correction is far smaller than the
+    N2:Ar calibration uncertainty that dominates the flux.
+    """
+    t, s = temp_degc, sal_psu
+    p = _EOS80_PURE
+    rho_w = p[0] + p[1] * t + p[2] * t**2 + p[3] * t**3 + p[4] * t**4 + p[5] * t**5
+    a = _EOS80_A
+    coef_a = a[0] + a[1] * t + a[2] * t**2 + a[3] * t**3 + a[4] * t**4
+    b = _EOS80_B
+    coef_b = b[0] + b[1] * t + b[2] * t**2
+    return (rho_w + coef_a * s + coef_b * s**1.5 + _EOS80_C * s**2) / 1000
+
+
+def n2_ar_sensitivity_from_standard(raw_ratio: float, temp_degc: float, sal_psu: float) -> float:
+    """Instrument mass-28/mass-40 sensitivity ratio from an air-equilibrated standard.
+
+    Run water equilibrated with air at a known, stable temperature and
+    salinity through the chamber, take the RGA's raw I28/I40 there, and this
+    returns the factor to divide subsequent raw ratios by so they become true
+    molar N2/Ar ratios. Pass the result as ``n2_ar_sensitivity_ratio``.
+    """
+    true_ratio = gas_solubility_umol_kg("N2", temp_degc, sal_psu) / gas_solubility_umol_kg("Ar", temp_degc, sal_psu)
+    return raw_ratio / true_ratio
 
 
 def concentration_series(cycles: pl.DataFrame, value_col: str) -> pl.DataFrame:
@@ -210,12 +286,27 @@ def _rate_rows(series: pl.DataFrame, variable: str, output_unit: str) -> list[di
     ]
 
 
-def _n2_dissolved_umol_l_column(cycles: pl.DataFrame) -> pl.Series:
+def _n2_dissolved_umol_l_column(cycles: pl.DataFrame, n2_ar_sensitivity_ratio: float) -> pl.Series:
+    """Dissolved [N2] (umol/L) from the raw mass-28/mass-40 ion-current ratio.
+
+    [N2] = (I28/I40 / k) * Ar_solubility(T,S) * density(T,S), where k is the
+    instrument sensitivity ratio (see DEFAULT_N2_AR_SENSITIVITY_RATIO). Uses
+    the raw *_avg counts rather than *_torr so the RGA's approximate nominal
+    Faraday-cup sensitivity cancels in the ratio.
+
+    Note this takes [Ar] to be the atmospheric equilibrium value at each
+    cycle's own T and S. Ar is biologically inert, so in a sealed chamber the
+    true [Ar] is fixed; recomputing it per cycle means chamber temperature
+    drift moves the Ar term (about -2%/degC) and shows up as apparent N2
+    change. That is negligible at the sub-0.1 degC/h drift most incubations
+    show, but not for one that swings degrees per hour -- check the temp_degC
+    rate rows before trusting an N2 flux from a thermally unstable incubation.
+    """
     temps = cycles["temp_degC"].to_list()
     sals = cycles["sal_PSU"].to_list()
     ratios = (cycles["mass_28_avg"] / cycles["mass_40_avg"]).to_list()
     values = [
-        ratio * ar_solubility_umol_kg(t, s) * SEAWATER_DENSITY_KG_PER_L
+        (ratio / n2_ar_sensitivity_ratio) * ar_solubility_umol_kg(t, s) * seawater_density_kg_per_l(t, s)
         if ratio is not None and t is not None and s is not None
         else None
         for ratio, t, s in zip(ratios, temps, sals)
@@ -223,7 +314,12 @@ def _n2_dissolved_umol_l_column(cycles: pl.DataFrame) -> pl.Series:
     return pl.Series("_n2_umol_l", values, dtype=pl.Float64)
 
 
-def compute_fluxes(cycles: pl.DataFrame, chamber_volume_l: float, chamber_area_m2: float) -> pl.DataFrame:
+def compute_fluxes(
+    cycles: pl.DataFrame,
+    chamber_volume_l: float,
+    chamber_area_m2: float,
+    n2_ar_sensitivity_ratio: float = DEFAULT_N2_AR_SENSITIVITY_RATIO,
+) -> pl.DataFrame:
     """Compute benthic flux (or, for temp_degC, a bare rate) per (experiment, chamber).
 
     ``cycles`` is an egcf_chamber_cycles-shaped table (or the dashboard's
@@ -238,6 +334,8 @@ def compute_fluxes(cycles: pl.DataFrame, chamber_volume_l: float, chamber_area_m
     """
     if chamber_volume_l <= 0 or chamber_area_m2 <= 0:
         raise ValueError("chamber_volume_l and chamber_area_m2 must both be positive")
+    if n2_ar_sensitivity_ratio <= 0:
+        raise ValueError("n2_ar_sensitivity_ratio must be positive")
 
     rows: list[dict] = []
 
@@ -252,7 +350,8 @@ def compute_fluxes(cycles: pl.DataFrame, chamber_volume_l: float, chamber_area_m
 
     if {"mass_28_avg", "mass_40_avg", "temp_degC", "sal_PSU"} <= set(cycles.columns):
         n2 = cycles.filter(pl.col("mass_40_avg") != 0)
-        series = concentration_series(n2.with_columns(_n2_dissolved_umol_l_column(n2)), "_n2_umol_l")
+        n2_col = _n2_dissolved_umol_l_column(n2, n2_ar_sensitivity_ratio)
+        series = concentration_series(n2.with_columns(n2_col), "_n2_umol_l")
         rows += _flux_rows(series, "n2_denitrification", 1.0, chamber_volume_l, chamber_area_m2)
 
     if "temp_degC" in cycles.columns:

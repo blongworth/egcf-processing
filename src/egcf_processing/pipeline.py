@@ -13,6 +13,7 @@ DEFAULT_SETTLE_OFFSET_S = 60.0
 DEFAULT_OUTPUT_FORMAT = "parquet"
 DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR = aggregate.DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR
 DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = aggregate.DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR
+DEFAULT_N2_AR_SENSITIVITY_RATIO = flux.DEFAULT_N2_AR_SENSITIVITY_RATIO
 
 
 def run(
@@ -24,6 +25,7 @@ def run(
     output_format: str = DEFAULT_OUTPUT_FORMAT,
     partial_pressure_sensitivity_a_per_torr: float = DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     total_pressure_sensitivity_a_per_torr: float = DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+    n2_ar_sensitivity_ratio: float = DEFAULT_N2_AR_SENSITIVITY_RATIO,
 ) -> dict:
     files = discovery.find_all_files(raw_dir)
     logger.info("found %d gems_*.txt/surface_*_lander.log file(s) under %s", len(files), raw_dir)
@@ -63,7 +65,12 @@ def run(
         total_pressure_sensitivity_a_per_torr,
     )
 
-    layer_d = flux.compute_fluxes(layer_c, chamber_volume_l, chamber_area_m2)
+    layer_d = flux.compute_fluxes(layer_c, chamber_volume_l, chamber_area_m2, n2_ar_sensitivity_ratio)
+    if n2_ar_sensitivity_ratio == 1.0:
+        logger.warning(
+            "n2_ar_sensitivity_ratio is 1.0 (uncalibrated): N2:Ar flux magnitude is not quantitative -- "
+            "measure it with flux.n2_ar_sensitivity_from_standard() against an air-equilibrated standard"
+        )
 
     scans_path = combine.write_df(layer_b, out_dir, "egcf_rga_scans", output_format)
     cycles_path = combine.write_df(layer_c, out_dir, "egcf_chamber_cycles", output_format)

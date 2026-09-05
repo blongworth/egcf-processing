@@ -138,23 +138,55 @@ means the row is absent from the output, never an error):
   for — don't silently "correct" it to TA without checking, and don't add a TA calculation
   without the DIC/pCO2 second carbonate-system parameter it would need.
 - **`n2_denitrification`** — N2:Ar ratio method (Kana et al. 1994):
-  `[N2] ≈ (mass_28_avg / mass_40_avg) * ar_solubility_umol_kg(temp_degC, sal_PSU) * density`.
+  `[N2] = (mass_28_avg / mass_40_avg / k) * ar_solubility_umol_kg(temp_degC, sal_PSU) * density(T,S)`.
   Deliberately uses the **raw `_avg` counts, not `_torr`** — the ratio cancels the RGA's
-  approximate nominal sensitivity entirely, which is the whole point of the method (Ar is a
-  conservative tracer, so no absolute RGA calibration is needed). Cycles with `mass_40_avg == 0`
-  are dropped from the fit rather than producing an infinite ratio.
+  approximate nominal Faraday-cup sensitivity, which is the point of the method (Ar is a
+  conservative tracer). Cycles with `mass_40_avg == 0` are dropped from the fit rather than
+  producing an infinite ratio.
+
+  `k` is `n2_ar_sensitivity_ratio` — the RGA's **mass-28/mass-40 sensitivity ratio**, which is
+  *not* 1. An RGA's transmission and ionization cross-section differ per mass, so the raw
+  I28/I40 is not the molar N2/Ar ratio: in the real bench corpus it runs ~45 where
+  air-equilibrated seawater should read ~37 (Hamme & Emerson's own Table 3 measured 36.6–38.9).
+  Measure `k` with `flux.n2_ar_sensitivity_from_standard(raw_ratio, T, S)` against
+  air-equilibrated water at known T/S and pass it via `--n2-ar-sensitivity-ratio`. The default
+  1.0 means *uncalibrated* — sign and shape of the flux are right, magnitude is not, and
+  `pipeline.run()` logs a warning when it's left there.
+
+  Second caveat, structural rather than a constant: `[Ar]` is taken as the atmospheric
+  equilibrium value at **each cycle's own T and S**. Ar is inert, so in a sealed chamber the
+  true `[Ar]` is fixed; recomputing it per cycle lets temperature drift move the Ar term
+  (≈ −2%/°C) and appear as N2 change. Negligible at the sub-0.1 °C/h drift most incubations in
+  the bench corpus show, but an incubation drifting degrees per hour will carry a spurious N2
+  signal — check the `temp_degC` rate row for the same `(experiment, chamber)` before trusting
+  its N2 flux. Whether to instead anchor `[Ar]` at each incubation's first cycle depends on the
+  chamber's real flush/seal semantics; it was left per-cycle rather than guessed at.
 - **`temp_degC`** — reported as a **rate in °C/h, not a flux**, and not scaled by V/A. There's no
   mass/energy-conservation quantity for temperature without water density and specific heat
   capacity, which is out of scope. It rides in the same table (distinguished by `output_unit`) as
   an incubation QA signal — is the chamber heating from internal electronics vs. tracking ambient
   tide.
 
-Two approximations to verify before trusting absolute N2 numbers, both flagged in the code:
-the `_AR_SOLUBILITY_COEFFS` (Hamme & Emerson 2004, Deep-Sea Research I 51:1517–1528, Table 4)
-were transcribed from memory rather than the primary source, and `SEAWATER_DENSITY_KG_PER_L`
-is a fixed 1.025 rather than a real T/S equation of state. `tests/test_flux.py` currently checks
-Ar solubility only for physical plausibility and the right monotonic direction in T and S, not
-against reference values.
+**Both physical constants are verified against their primary sources**, and
+`tests/test_flux.py` asserts each against published check values rather than a plausibility
+range — regenerate nothing here without re-checking those:
+
+- `_SOLUBILITY_COEFFS` — Hamme & Emerson (2004), Deep-Sea Research I 51:1517–1528, Table 4,
+  for both Ar and N2. Their Equation 1 is `ln C = A0 + A1·Ts + A2·Ts² + A3·Ts³ + S·(B0 + B1·Ts +
+  B2·Ts²)` with `Ts = ln((298.15 − t)/(273.15 + t))`, giving µmol/kg in equilibrium with moist
+  air at 1 atm **total** pressure. The paper's own check values at 10 °C, S=35 (Ar 13.4622,
+  N2 500.885 µmol/kg) are the test. Valid 0–30 °C and distilled water through seawater, so the
+  estuarine salinity range is in scope — though the salinity dependence is a Setchenow relation
+  fit at only two salinities (~0 and ~35), so mid-estuarine values are interpolated.
+- `seawater_density_kg_per_l` — UNESCO/EOS-80 one-atmosphere equation, tested against UNESCO
+  Technical Paper in Marine Science No. 44 p.22. This replaced a fixed 1.025 kg/L, which is
+  ~1.4% off at S=15 and ~2.6% off in fresh water — a real error in an estuary, feeding straight
+  into N2 flux magnitude.
+
+Not corrected for: **barometric pressure**. The solubilities are referenced to exactly 1 atm;
+real sea-level pressure varies a few percent and scales `[Ar]` — hence the N2 flux — nearly
+linearly. Correcting it properly needs the barometric pressure at the time the water last
+equilibrated with the atmosphere, which a benthic lander can't observe.
 
 `linear_fit()` lives here, not in `dashboard.py` — it was promoted so pipeline and dashboard share
 one implementation; `dashboard.py` re-exports it, so existing imports from there still work.

@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from egcf_processing.pipeline import (
+    DEFAULT_N2_AR_SENSITIVITY_RATIO,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     DEFAULT_SETTLE_OFFSET_S,
@@ -55,6 +56,14 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
         help="RGA total pressure sensitivity in A/Torr, used to convert total pressure current to Torr",
     )
+    parser.add_argument(
+        "--n2-ar-sensitivity-ratio",
+        type=float,
+        default=DEFAULT_N2_AR_SENSITIVITY_RATIO,
+        help="RGA mass-28/mass-40 sensitivity ratio, from an air-equilibrated standard "
+        "(see flux.n2_ar_sensitivity_from_standard). Leaving this at 1.0 makes N2:Ar flux "
+        "non-quantitative in magnitude",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -68,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
         output_format=args.format,
         partial_pressure_sensitivity_a_per_torr=args.partial_pressure_sensitivity,
         total_pressure_sensitivity_a_per_torr=args.total_pressure_sensitivity,
+        n2_ar_sensitivity_ratio=args.n2_ar_sensitivity_ratio,
     )
 
 

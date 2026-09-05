@@ -5,12 +5,14 @@ import pytest
 
 from egcf_processing.flux import (
     O2_UMOL_PER_MG,
-    SEAWATER_DENSITY_KG_PER_L,
     ar_solubility_umol_kg,
     compute_fluxes,
     concentration_series,
+    gas_solubility_umol_kg,
     linear_fit,
+    n2_ar_sensitivity_from_standard,
     ols_fit,
+    seawater_density_kg_per_l,
 )
 
 VOLUME_L = 4.0
@@ -65,16 +67,55 @@ def test_ols_fit_r2_below_one_for_scattered_points():
     assert 0.0 < fit["r2"] < 1.0
 
 
-def test_ar_solubility_is_physically_plausible_and_decreases_with_temp_and_salinity():
-    # Open-ocean Ar solubility sits around 13-17 umol/kg over normal T/S ranges.
-    # TODO: verify the Hamme & Emerson (2004) Table 4 coefficients against the
-    # paper directly and replace this range check with exact reference values.
-    cold = ar_solubility_umol_kg(0.0, 35.0)
-    warm = ar_solubility_umol_kg(25.0, 35.0)
-    fresh = ar_solubility_umol_kg(10.0, 0.0)
-    salty = ar_solubility_umol_kg(10.0, 35.0)
-    assert 10.0 < warm < cold < 25.0
-    assert salty < fresh
+def test_gas_solubility_matches_hamme_emerson_published_check_values():
+    # Hamme & Emerson (2004) Table 4 publishes check values at 10 degC, S=35
+    # (PSS) for exactly this purpose. Printed to 6 significant figures.
+    assert gas_solubility_umol_kg("Ar", 10.0, 35.0) == pytest.approx(13.4622, rel=1e-5)
+    assert gas_solubility_umol_kg("N2", 10.0, 35.0) == pytest.approx(500.885, rel=1e-5)
+    assert ar_solubility_umol_kg(10.0, 35.0) == pytest.approx(13.4622, rel=1e-5)
+
+
+def test_ar_solubility_decreases_with_temp_and_salinity():
+    assert ar_solubility_umol_kg(25.0, 35.0) < ar_solubility_umol_kg(0.0, 35.0)
+    assert ar_solubility_umol_kg(10.0, 35.0) < ar_solubility_umol_kg(10.0, 0.0)
+
+
+def test_seawater_density_matches_unesco_check_values():
+    # UNESCO Technical Paper in Marine Science No. 44, p.22, in kg/m^3.
+    for temp, sal, expected in [
+        (0.0, 0.0, 999.842594),
+        (30.0, 0.0, 995.65113374),
+        (0.0, 35.0, 1028.10633141),
+        (30.0, 35.0, 1021.72863949),
+    ]:
+        assert seawater_density_kg_per_l(temp, sal) == pytest.approx(expected / 1000, rel=1e-9)
+
+
+def test_n2_ar_sensitivity_from_standard_recovers_a_known_factor():
+    # An instrument reading exactly the true molar ratio has a factor of 1.
+    true_ratio = gas_solubility_umol_kg("N2", 12.0, 30.0) / gas_solubility_umol_kg("Ar", 12.0, 30.0)
+    assert n2_ar_sensitivity_from_standard(true_ratio, 12.0, 30.0) == pytest.approx(1.0)
+    # One reading 20% high on mass 28 has a factor of 1.2.
+    assert n2_ar_sensitivity_from_standard(true_ratio * 1.2, 12.0, 30.0) == pytest.approx(1.2)
+
+
+def test_n2_flux_scales_inversely_with_the_sensitivity_ratio():
+    cycles = _cycles(
+        mass_28_avg=[100.0, 110.0],
+        mass_40_avg=[1000.0, 1000.0],
+        temp_degC=[10.0, 10.0],
+        sal_PSU=[32.0, 32.0],
+    )
+    uncal = compute_fluxes(cycles, VOLUME_L, AREA_M2)
+    cal = compute_fluxes(cycles, VOLUME_L, AREA_M2, n2_ar_sensitivity_ratio=1.25)
+    u = uncal.filter(pl.col("variable") == "n2_denitrification")["output_value"][0]
+    c = cal.filter(pl.col("variable") == "n2_denitrification")["output_value"][0]
+    assert c == pytest.approx(u / 1.25)
+
+
+def test_nonpositive_sensitivity_ratio_is_rejected():
+    with pytest.raises(ValueError):
+        compute_fluxes(_cycles(oxygen_mgL=[8.0, 7.0]), VOLUME_L, AREA_M2, n2_ar_sensitivity_ratio=0.0)
 
 
 def test_concentration_series_fits_per_experiment_and_chamber():
@@ -144,7 +185,7 @@ def test_n2_denitrification_flux_from_mass_28_to_40_ratio():
     )
     fluxes = compute_fluxes(cycles, VOLUME_L, AREA_M2)
     n2 = fluxes.filter(pl.col("variable") == "n2_denitrification")
-    ar = ar_solubility_umol_kg(10.0, 32.0) * SEAWATER_DENSITY_KG_PER_L
+    ar = ar_solubility_umol_kg(10.0, 32.0) * seawater_density_kg_per_l(10.0, 32.0)
     expected_slope = (0.11 - 0.10) * ar
     assert n2["slope_native_per_min"][0] == pytest.approx(expected_slope)
     assert n2["output_value"][0] == pytest.approx(expected_slope * VOLUME_L / AREA_M2 * 60)
@@ -171,7 +212,7 @@ def test_zero_argon_cycles_are_dropped_from_the_n2_fit():
         }
     )
     n2 = compute_fluxes(cycles, VOLUME_L, AREA_M2).filter(pl.col("variable") == "n2_denitrification")
-    ar = ar_solubility_umol_kg(10.0, 32.0) * SEAWATER_DENSITY_KG_PER_L
+    ar = ar_solubility_umol_kg(10.0, 32.0) * seawater_density_kg_per_l(10.0, 32.0)
     # Ratio 0.10 at t=0 and 0.12 at t=2min, the zero-Argon cycle dropped entirely.
     assert n2["n_points"][0] == 2
     assert n2["slope_native_per_min"][0] == pytest.approx((0.12 - 0.10) * ar / 2)
