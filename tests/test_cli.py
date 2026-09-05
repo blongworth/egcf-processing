@@ -3,6 +3,9 @@ import pytest
 
 from egcf_processing.cli import main
 
+# Placeholder chamber geometry -- required flags, exercising flux arithmetic only.
+GEOMETRY = ["--chamber-volume-l", "4.0", "--chamber-area-m2", "0.06"]
+
 # Two 10s-long cycles: short enough that the default 60s settle offset drops
 # both as too-short, but long enough to survive with --settle-offset-s 0.
 RAW = "\n".join(
@@ -27,7 +30,7 @@ def test_main_uses_default_settle_offset_and_parquet_format(tmp_path):
     raw_dir = _write_raw(tmp_path)
     out_dir = tmp_path / "processed"
 
-    main([str(raw_dir), "--out-dir", str(out_dir)])
+    main([str(raw_dir), "--out-dir", str(out_dir), *GEOMETRY])
 
     # default settle_offset_s (60s) drops both 10s-long cycles as too-short.
     assert (out_dir / "egcf_chamber_cycles.parquet").exists()
@@ -38,7 +41,7 @@ def test_main_settle_offset_flag_reaches_pipeline(tmp_path):
     raw_dir = _write_raw(tmp_path)
     out_dir = tmp_path / "processed"
 
-    main([str(raw_dir), "--out-dir", str(out_dir), "--settle-offset-s", "0"])
+    main([str(raw_dir), "--out-dir", str(out_dir), *GEOMETRY, "--settle-offset-s", "0"])
 
     chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
     assert chamber_cycles.height == 2
@@ -49,7 +52,7 @@ def test_main_format_flag_writes_csv_not_parquet(tmp_path):
     raw_dir = _write_raw(tmp_path)
     out_dir = tmp_path / "processed"
 
-    main([str(raw_dir), "--out-dir", str(out_dir), "--settle-offset-s", "0", "--format", "csv"])
+    main([str(raw_dir), "--out-dir", str(out_dir), *GEOMETRY, "--settle-offset-s", "0", "--format", "csv"])
 
     assert (out_dir / "egcf_chamber_cycles.csv").exists()
     assert not (out_dir / "egcf_chamber_cycles.parquet").exists()
@@ -64,6 +67,7 @@ def test_main_partial_pressure_sensitivity_flag_reaches_pipeline(tmp_path):
             str(raw_dir),
             "--out-dir",
             str(out_dir),
+            *GEOMETRY,
             "--settle-offset-s",
             "0",
             "--partial-pressure-sensitivity",
@@ -94,6 +98,7 @@ def test_main_total_pressure_sensitivity_flag_reaches_pipeline(tmp_path):
             str(raw_dir),
             "--out-dir",
             str(out_dir),
+            *GEOMETRY,
             "--settle-offset-s",
             "0",
             "--total-pressure-sensitivity",

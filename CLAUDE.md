@@ -22,7 +22,8 @@ uv sync                            # install deps
 uv run pytest -q                   # run the full test suite
 uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
-uv run main.py <raw_dir> --out-dir <out_dir> [--settle-offset-s 60] [--format parquet|csv]
+uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
+    [--settle-offset-s 60] [--format parquet|csv]
 uv run streamlit run dashboard.py  # launch the read-only dashboard
 ```
 
@@ -31,7 +32,7 @@ non-obvious, explicit polars schemas, functions over classes.
 
 `data/` is gitignored — raw logs and processed output live there and are never committed.
 
-## Architecture: three layers, one shared aggregator
+## Architecture: four layers, one shared aggregator
 
 ```
 src/egcf_processing/
@@ -42,7 +43,8 @@ src/egcf_processing/
   rga_scans.py   # Layer B window boundaries: RGA scan-cycle detection
   cycles.py      # Layer C window boundaries: chamber-cycle + experiment numbering
   aggregate.py   # shared windowed aggregation used by both Layer B and C
-  pipeline.py    # orchestrates the above; run(raw_dir, out_dir, settle_offset_s, output_format)
+  flux.py        # Layer D: benthic vertical flux from Layer C's cycle averages
+  pipeline.py    # orchestrates the above; run(raw_dir, out_dir, chamber_volume_l, chamber_area_m2, ...)
   cli.py         # argparse entry point
   dashboard.py   # Streamlit app (read-only viewer over data/processed)
 main.py          # thin shim -> egcf_processing.cli.main
@@ -56,6 +58,9 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
    data itself (a "masses seen in this scan" set that resets on a repeat).
 3. **Layer C (`egcf_chamber_cycles`)** — one row per chamber measurement cycle (`V:` transition into
    `(chamber, Re)` to the next transition), averaged over `[cycle_start + settle_offset, next_transition)`.
+4. **Layer D (`egcf_fluxes`)** — one row per `(experiment_number, chamber, variable)`: benthic vertical
+   flux (`dC/dt * V/A`, in µmol m⁻² h⁻¹) fit from Layer C's cycle averages. Chamber volume and area
+   are required inputs with no default. See `AGENTS.md` for the per-variable formulas and caveats.
 
 Layers B and C share `aggregate.aggregate_onto_windows()` — they differ only in which `windows`
 table they're aggregated onto. If you need a third grain, add another window-boundary function and

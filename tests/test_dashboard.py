@@ -363,6 +363,58 @@ def test_experiment_tab_cycle_averages_shows_fit_and_rates_plot(tmp_path):
     assert "rate per experiment" in rates_spec
 
 
+def test_experiment_tab_flux_table_needs_chamber_geometry(tmp_path):
+    # Same two-C1-cycle setup as the fit/rates test, plus scalup oxygen so
+    # there's a flux to compute once geometry is supplied.
+    valve_df = pl.DataFrame(
+        {
+            "ts": [
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 0, 5, 0),
+                datetime(2026, 1, 1, 0, 10, 0),
+                datetime(2026, 1, 1, 0, 15, 0),
+            ],
+            "chamber": ["C1", "C1", "C1", "C1"],
+            "flush_state": ["Re", "Fl", "Re", "Fl"],
+        }
+    )
+    valve_df.write_parquet(tmp_path / "valve.parquet")
+    scalup_df = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 2, 30), datetime(2026, 1, 1, 0, 12, 30)],
+            "ts_scalup": [datetime(2026, 1, 1, 0, 2, 30), datetime(2026, 1, 1, 0, 12, 30)],
+            "temp_degc": [12.0, 12.0],
+            "sal_psu": [32.0, 32.0],
+            "pressure_mbar": [1013.0, 1013.0],
+            "oxygen_mgl": [8.0, 7.0],
+            "ph": [8.1, 8.0],
+        }
+    )
+    scalup_df.write_parquet(tmp_path / "scalup.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value("Cycle averages").run(timeout=60)
+    assert not at.exception
+    # Geometry defaults to 0, so the flux table is replaced by a prompt.
+    assert not at.tabs[2].dataframe
+    assert any("chamber volume" in info.value for info in at.tabs[2].info)
+
+    at.sidebar.number_input[2].set_value(4.0).run(timeout=60)
+    at.sidebar.number_input[3].set_value(0.06).run(timeout=60)
+    assert not at.exception
+
+    tables = at.tabs[2].dataframe
+    assert len(tables) == 1
+    flux_table = pl.from_pandas(tables[0].value)
+    assert set(flux_table["variable"].to_list()) == {"oxygen", "h_ion", "temp_degC"}
+    oxygen = flux_table.filter(pl.col("variable") == "oxygen")
+    # 8.0 -> 7.0 mg/L over the 10 min between the two cycles' window starts.
+    assert oxygen["slope_native_per_min"][0] == pytest.approx(-0.1)
+    assert oxygen["output_value"][0] == pytest.approx(-0.1 * (1000 / 32) * 4.0 / 0.06 * 60)
+
+
 def test_experiment_tab_full_data_grain_shows_experiment_start_subtitle(tmp_path):
     valve_df = pl.DataFrame(
         {

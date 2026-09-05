@@ -27,7 +27,8 @@ src/egcf_processing/
   rga_scans.py     # Layer B window boundaries: RGA scan-cycle detection
   cycles.py        # Layer C window boundaries: chamber-cycle + experiment numbering
   aggregate.py     # shared windowed aggregation used by both Layer B and C
-  pipeline.py      # orchestrates the above; run(raw_dir, out_dir, settle_offset_s, output_format)
+  flux.py          # Layer D: benthic vertical flux from Layer C's cycle averages
+  pipeline.py      # orchestrates the above; run(raw_dir, out_dir, chamber_volume_l, chamber_area_m2, ...)
   cli.py           # argparse entry point
 main.py            # thin shim -> egcf_processing.cli.main
 tests/             # one test file per module above (including test_cli.py), plus test_pipeline.py (end-to-end)
@@ -58,7 +59,9 @@ just accepting whatever the (possibly buggy) code produces.
 `tests/test_cli.py` covers `cli.py`'s argparse wiring specifically -- that each
 flag (`--settle-offset-s`, `--format`, `--partial-pressure-sensitivity`,
 `--total-pressure-sensitivity`) actually reaches `pipeline.run()` and changes
-its output accordingly, and that the argparse defaults match `pipeline`'s
+its output accordingly, that the required `--chamber-volume-l`/`--chamber-area-m2`
+flags are supplied (via the shared `GEOMETRY` list -- placeholder values that
+exercise the flux arithmetic, not real EGFC dimensions), and that the argparse defaults match `pipeline`'s
 `DEFAULT_*` constants. This is functional (real `main()` calls against a
 tmp_path raw dir, real output files read back), not a mock of `pipeline.run`,
 consistent with the rest of the suite's preference for exercising real code
@@ -88,7 +91,7 @@ occurs" gotcha below is specific to the SD-card recovery data; `data/raw/surface
 has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total_pressure_current`/
 `pump_rpm` do get populated when processing surface data, unlike the gems-only case described below.
 
-## Pipeline model (three layers)
+## Pipeline model (four layers)
 
 1. **Layer A (raw combined)** — every raw file (gems + surface, see above) parsed and concatenated by
    tag into `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`).
@@ -100,11 +103,74 @@ has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total
    into `(chamber, Re)` to the next transition), averaged over `[cycle_start + settle_offset, next_transition)`.
    `experiment_number` increments when a `(C1, Re)` transition follows a `(C2, Fl)` transition
    since the last boundary; `elapsed_time` is time since that experiment's start.
+4. **Layer D (`egcf_fluxes`)** — one row per `(experiment_number, chamber, variable)`: the benthic
+   vertical flux over one incubation, from the OLS slope of Layer C's cycle averages. See
+   "Flux calculation" below.
 
 Layers B and C share one aggregation function, `aggregate.aggregate_onto_windows()` — they differ
 only in which `windows` table (window_start, window_end, chamber, experiment_number, elapsed_time)
 they're aggregated onto. Don't duplicate the averaging logic if you need a third grain; add another
-window-boundary function instead and call the same aggregator.
+window-boundary function instead and call the same aggregator. Layer D is different in kind — it
+consumes Layer C's output rather than raw readings, so it doesn't use the windowed aggregator at all.
+
+## Flux calculation (`flux.py`, Layer D)
+
+`Flux = dC/dt * V / A` — the OLS slope of a cycle-averaged concentration against `elapsed_time`
+across one experiment's incubation (Layer C's cycle averages are that incubation's samples),
+scaled by the chamber's enclosed water volume `V` and the sediment footprint area `A` enclosed by
+its base. Both are **required** inputs with no default (`pipeline.run()` positional params,
+`--chamber-volume-l` / `--chamber-area-m2` with `required=True`) — unlike the RGA's nominal
+Faraday-cup sensitivity there is no meaningful "nominal" chamber size to fall back on, so a wrong
+flux from a silent default would be worse than an argparse error. They're the same for C1 and C2
+per the project owner. The dashboard's sidebar inputs default to `0.0`, which suppresses the flux
+table with a prompt rather than computing a divide-by-zero.
+
+Reported in **µmol m⁻² h⁻¹** — an explicit project preference over the more common
+mmol m⁻² d⁻¹ convention. Sign is never forced positive: rising concentration = efflux
+(sediment → water) = positive; falling = uptake (e.g. O2 consumption / SOD) = negative.
+
+Variables computed, each only when its source column(s) exist on the input table (a missing source
+means the row is absent from the output, never an error):
+
+- **`oxygen`** — from `oxygen_mgL`, converted mg/L → µmol/L at O2's 32 g/mol molar mass.
+- **`h_ion`** — from `10^(-pH)` (mol/L → µmol/L). Note this is a *raw H⁺* flux, which is
+  unconventional; most benthic studies report total alkalinity flux instead. It's what was asked
+  for — don't silently "correct" it to TA without checking, and don't add a TA calculation
+  without the DIC/pCO2 second carbonate-system parameter it would need.
+- **`n2_denitrification`** — N2:Ar ratio method (Kana et al. 1994):
+  `[N2] ≈ (mass_28_avg / mass_40_avg) * ar_solubility_umol_kg(temp_degC, sal_PSU) * density`.
+  Deliberately uses the **raw `_avg` counts, not `_torr`** — the ratio cancels the RGA's
+  approximate nominal sensitivity entirely, which is the whole point of the method (Ar is a
+  conservative tracer, so no absolute RGA calibration is needed). Cycles with `mass_40_avg == 0`
+  are dropped from the fit rather than producing an infinite ratio.
+- **`temp_degC`** — reported as a **rate in °C/h, not a flux**, and not scaled by V/A. There's no
+  mass/energy-conservation quantity for temperature without water density and specific heat
+  capacity, which is out of scope. It rides in the same table (distinguished by `output_unit`) as
+  an incubation QA signal — is the chamber heating from internal electronics vs. tracking ambient
+  tide.
+
+Two approximations to verify before trusting absolute N2 numbers, both flagged in the code:
+the `_AR_SOLUBILITY_COEFFS` (Hamme & Emerson 2004, Deep-Sea Research I 51:1517–1528, Table 4)
+were transcribed from memory rather than the primary source, and `SEAWATER_DENSITY_KG_PER_L`
+is a fixed 1.025 rather than a real T/S equation of state. `tests/test_flux.py` currently checks
+Ar solubility only for physical plausibility and the right monotonic direction in T and S, not
+against reference values.
+
+`linear_fit()` lives here, not in `dashboard.py` — it was promoted so pipeline and dashboard share
+one implementation; `dashboard.py` re-exports it, so existing imports from there still work.
+`ols_fit()` is the same fit plus `r2`/`n` for output QA, kept separate so the dashboard's plotting
+call sites don't have to unpack a dict for a slope they already had.
+
+### Not implemented: calibrated flux for other RGA masses
+
+Flux for any other scanned mass (CO2 at 44, etc.) needs one of two things this repo doesn't have:
+(a) a real calibration curve from air-equilibrated water standards run across the deployment's
+temperature range, replacing the nominal Faraday-cup sensitivity with a measured A/Torr and a
+species-specific Henry's-law solubility, or (b) a ratio-to-Ar treatment like N2's, which only
+works for a species whose solubility behavior can be tied to Ar's. Don't add a mass-44 flux column
+by dividing `mass_44_torr` by a guessed solubility — the nominal sensitivity makes the absolute
+Torr values approximate (see the RGA conversion note above), so the result would look
+quantitative while being off by whatever the real SP/ST calibration factor is.
 
 ## Data format gotchas (confirmed against real files, not just the README)
 
@@ -223,6 +289,14 @@ a cycle at the same elapsed time, collapsing them onto one x-position).
 (`#B0B0B0`) "dropped (settling)" trace instead of hiding them, while kept
 points still render per-chamber in their normal colors.
 
+Below the rate plot, `Cycle averages` also renders a **Benthic flux** table
+(`_render_experiment_fluxes`) for the selected experiment, calling the same
+`flux.compute_fluxes()` the pipeline uses against the live-built cycle-averaged
+table. It's deliberately independent of the Variable selectbox -- the flux
+quantities are a fixed set (see "Flux calculation"), not user-selected -- and is
+replaced by a prompt when the sidebar's chamber volume/area are still at their
+`0.0` defaults.
+
 `Cycle averages` also fits a rate for the selected variable: `linear_fit()`
 is a plain ordinary-least-squares slope/intercept over `(elapsed_time_min,
 value)` (pure Python, no numpy dependency added for it), computed
@@ -322,7 +396,8 @@ manual click-through likely wouldn't have (this environment has no browser).
 ```
 uv sync                 # install deps (polars, pytest dev group, streamlit, plotly)
 uv run pytest -q        # run the test suite
-uv run main.py <raw_dir> --out-dir <out_dir> [--settle-offset-s 60] [--format parquet|csv]
+uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
+    [--settle-offset-s 60] [--format parquet|csv]
 uv run streamlit run dashboard.py   # launch the dashboard
 ```
 

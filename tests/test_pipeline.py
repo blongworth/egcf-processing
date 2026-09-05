@@ -1,6 +1,12 @@
 import polars as pl
+import pytest
 
 from egcf_processing.pipeline import run
+
+# Placeholder chamber geometry -- exercises the flux arithmetic only, not real
+# EGFC dimensions.
+TEST_VOLUME_L = 4.0
+TEST_AREA_M2 = 0.06
 
 FILE_1 = "\n".join(
     [
@@ -48,7 +54,7 @@ def test_end_to_end_pipeline_merges_gems_and_surface_sources(tmp_path):
     )
 
     out_dir = tmp_path / "processed"
-    stats = run(raw_dir, out_dir, settle_offset_s=0)
+    stats = run(raw_dir, out_dir, TEST_VOLUME_L, TEST_AREA_M2, settle_offset_s=0)
 
     assert stats["n_files"] == 2
     assert stats["cycle_stats"]["total_cycles"] == 3
@@ -70,7 +76,7 @@ def test_end_to_end_pipeline(tmp_path):
     (raw_dir / "gems_2026-01-01-08-00.txt").write_text("")  # 0-byte file, must be skipped
 
     out_dir = tmp_path / "processed"
-    stats = run(raw_dir, out_dir, settle_offset_s=0)
+    stats = run(raw_dir, out_dir, TEST_VOLUME_L, TEST_AREA_M2, settle_offset_s=0)
 
     assert stats["n_files"] == 2
     assert stats["cycle_stats"]["total_cycles"] == 3
@@ -88,6 +94,42 @@ def test_end_to_end_pipeline(tmp_path):
     assert rga_scans.height == 2
     assert rga_scans["mass_2_avg"].to_list() == [10.0, 11.0]
 
+    # No scalup data in this raw text, so every flux source column is null --
+    # the file is still written, with the full schema, just empty.
+    fluxes = pl.read_parquet(out_dir / "egcf_fluxes.parquet")
+    assert fluxes.is_empty()
+    assert "output_value" in fluxes.columns
+
+
+def test_end_to_end_pipeline_computes_oxygen_flux(tmp_path):
+    # Two C1 measurement cycles 2 min apart (a flush span between them),
+    # oxygen 8.0 -> 7.0 mg/L: -0.5 mg/L/min uptake.
+    raw = "\n".join(
+        [
+            "V:2026-01-01T00:00:00Z,C1,Re",
+            "P:2026-01-01T00:00:01Z,2026-01-01T00:00:01Z,12.0,32.0,8.0,8.1",
+            "V:2026-01-01T00:01:00Z,C1,Fl",
+            "V:2026-01-01T00:02:00Z,C1,Re",
+            "P:2026-01-01T00:02:01Z,2026-01-01T00:02:01Z,12.0,32.0,7.0,8.1",
+            "V:2026-01-01T00:03:00Z,C2,Fl",
+        ]
+    )
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(raw)
+
+    out_dir = tmp_path / "processed"
+    run(raw_dir, out_dir, TEST_VOLUME_L, TEST_AREA_M2, settle_offset_s=0)
+
+    fluxes = pl.read_parquet(out_dir / "egcf_fluxes.parquet")
+    oxygen = fluxes.filter(pl.col("variable") == "oxygen")
+    assert oxygen.height == 1
+    assert oxygen["chamber"][0] == "C1"
+    # -0.5 mg/L/min * (1000/32) umol/mg * 4.0 L / 0.06 m^2 * 60 min/h.
+    assert oxygen["slope_native_per_min"][0] == pytest.approx(-0.5)
+    assert oxygen["output_value"][0] == pytest.approx(-0.5 * (1000 / 32) * 4.0 / 0.06 * 60)
+    assert oxygen["output_unit"][0] == "umol m-2 h-1"
+
 
 def test_end_to_end_pipeline_csv_format(tmp_path):
     raw_dir = tmp_path / "raw"
@@ -95,9 +137,9 @@ def test_end_to_end_pipeline_csv_format(tmp_path):
     (raw_dir / "gems_2026-01-01-00-00.txt").write_text(FILE_1)
 
     out_dir = tmp_path / "processed"
-    run(raw_dir, out_dir, settle_offset_s=0, output_format="csv")
+    run(raw_dir, out_dir, TEST_VOLUME_L, TEST_AREA_M2, settle_offset_s=0, output_format="csv")
 
-    for name in ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]:
+    for name in ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles", "egcf_fluxes"]:
         assert (out_dir / f"{name}.csv").exists()
         assert not (out_dir / f"{name}.parquet").exists()
 

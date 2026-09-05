@@ -48,7 +48,7 @@ def test_gold_standard_chamber_cycles(tmp_path):
     (raw_dir / "gems_2026-01-01-00-00.txt").write_bytes((FIXTURES / "gems_gold_standard.txt").read_bytes())
 
     out_dir = tmp_path / "processed"
-    run(raw_dir, out_dir, settle_offset_s=0, output_format="csv")
+    run(raw_dir, out_dir, 4.0, 0.06, settle_offset_s=0, output_format="csv")
 
     actual = pl.read_csv(out_dir / "egcf_chamber_cycles.csv")
     expected = pl.read_csv(FIXTURES / "egcf_chamber_cycles_expected.csv")
@@ -61,7 +61,7 @@ def test_gold_standard_rga_scans(tmp_path):
     (raw_dir / "gems_2026-01-01-00-00.txt").write_bytes((FIXTURES / "gems_gold_standard.txt").read_bytes())
 
     out_dir = tmp_path / "processed"
-    run(raw_dir, out_dir, settle_offset_s=0, output_format="csv")
+    run(raw_dir, out_dir, 4.0, 0.06, settle_offset_s=0, output_format="csv")
 
     actual = pl.read_csv(out_dir / "egcf_rga_scans.csv")
     expected = pl.read_csv(FIXTURES / "egcf_rga_scans_expected.csv")

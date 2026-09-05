@@ -32,6 +32,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Output file format for all written tables",
     )
     parser.add_argument(
+        "--chamber-volume-l",
+        type=float,
+        required=True,
+        help="Chamber enclosed water volume in liters (same for C1 and C2), used to scale flux",
+    )
+    parser.add_argument(
+        "--chamber-area-m2",
+        type=float,
+        required=True,
+        help="Sediment footprint area enclosed by the chamber base in m^2 (same for C1 and C2)",
+    )
+    parser.add_argument(
         "--partial-pressure-sensitivity",
         type=float,
         default=DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
@@ -50,6 +62,8 @@ def main(argv: list[str] | None = None) -> None:
     run(
         args.raw_dir,
         args.out_dir,
+        chamber_volume_l=args.chamber_volume_l,
+        chamber_area_m2=args.chamber_area_m2,
         settle_offset_s=args.settle_offset_s,
         output_format=args.format,
         partial_pressure_sensitivity_a_per_torr=args.partial_pressure_sensitivity,

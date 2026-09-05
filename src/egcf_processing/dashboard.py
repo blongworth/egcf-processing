@@ -24,6 +24,7 @@ from egcf_processing.aggregate import (
 )
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
 from egcf_processing.cycles import chamber_cycle_windows
+from egcf_processing.flux import compute_fluxes, linear_fit
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
 
 TABLE_NAMES = ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]
@@ -190,30 +191,6 @@ def variable_value_expr(variable: str, is_mass_variable: bool) -> pl.Expr:
     if is_mass_variable:
         return mass_to_argon_ratio_expr(int(variable.split("_")[1])).alias("value")
     return pl.col(variable).alias("value")
-
-
-def linear_fit(x: list[float], y: list[float]) -> tuple[float, float] | None:
-    """Ordinary least-squares slope and intercept of y = slope * x + intercept.
-
-    Used to turn a cycle-averaged time series into a rate (the slope) --
-    e.g. an Argon-normalized mass ratio's rate of change per minute during
-    one chamber incubation. Returns None with fewer than 2 points or if x
-    has zero variance (an undefined/vertical fit), rather than raising.
-    """
-    pairs = [(xi, yi) for xi, yi in zip(x, y) if xi is not None and yi is not None]
-    if len(pairs) < 2:
-        return None
-    xs, ys = zip(*pairs)
-    n = len(xs)
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    var_x = sum((xi - mean_x) ** 2 for xi in xs)
-    if var_x == 0:
-        return None
-    cov_xy = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(xs, ys))
-    slope = cov_xy / var_x
-    intercept = mean_y - slope * mean_x
-    return slope, intercept
 
 
 def experiment_rates(source: pl.DataFrame, variable: str, is_mass_variable: bool) -> pl.DataFrame:
@@ -604,6 +581,8 @@ def _render_experiment_cycle_averages(
     status: pl.DataFrame | None,
     valve: pl.DataFrame,
     total_pressure_sensitivity: float,
+    chamber_volume_l: float,
+    chamber_area_m2: float,
 ) -> None:
     settle_offset_s = st.slider(
         "Settling time after valve switch (s)",
@@ -709,6 +688,34 @@ def _render_experiment_cycle_averages(
     rates_df = experiment_rates(with_experiment, variable, is_mass_variable)
     _render_experiment_rates_plot(rates_df, variable_label, col_is_sci)
 
+    _render_experiment_fluxes(with_experiment, experiment, chamber_volume_l, chamber_area_m2)
+
+
+def _render_experiment_fluxes(
+    with_experiment: pl.DataFrame,
+    experiment: str,
+    chamber_volume_l: float,
+    chamber_area_m2: float,
+) -> None:
+    """Show benthic flux for the selected experiment, both chambers.
+
+    Independent of the Variable selectbox above -- these are a fixed set of
+    quantities (see flux.compute_fluxes), not user-selected ones.
+    """
+    st.subheader("Benthic flux")
+    if chamber_volume_l <= 0 or chamber_area_m2 <= 0:
+        st.info("Enter the chamber volume and sediment footprint area in the sidebar to compute flux.")
+        return
+    fluxes = compute_fluxes(with_experiment, chamber_volume_l, chamber_area_m2)
+    fluxes = fluxes.filter(pl.col("experiment_number").cast(pl.Utf8) == experiment)
+    if fluxes.is_empty():
+        st.info("Not enough cycles in this experiment to fit a flux.")
+        return
+    st.dataframe(
+        fluxes.select("chamber", "variable", "output_value", "output_unit", "slope_native_per_min", "r2", "n_points"),
+        width="stretch",
+    )
+
 
 _SETTLED_OUT_COLOR = "#B0B0B0"
 
@@ -811,6 +818,8 @@ def _render_experiment_rates_plot(rates_df: pl.DataFrame, variable_label: str, c
 def render_experiment_tab(
     tables: dict[str, pl.DataFrame | None],
     total_pressure_sensitivity: float,
+    chamber_volume_l: float = 0.0,
+    chamber_area_m2: float = 0.0,
 ) -> None:
     rga = tables["rga"]
     scalup = tables["scalup"]
@@ -826,7 +835,9 @@ def render_experiment_tab(
     if grain == "Full data":
         _render_experiment_full_data(rga, scalup, status, valve, total_pressure_sensitivity)
     else:
-        _render_experiment_cycle_averages(rga, scalup, status, valve, total_pressure_sensitivity)
+        _render_experiment_cycle_averages(
+            rga, scalup, status, valve, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2
+        )
 
 
 def render_overview(tables: dict[str, pl.DataFrame | None]) -> None:
@@ -861,6 +872,11 @@ def main() -> None:
         format="%.2e",
     )
 
+    st.sidebar.header("Chamber geometry")
+    st.sidebar.caption("Required to compute flux; there is no meaningful default.")
+    chamber_volume_l = st.sidebar.number_input("Chamber volume (L)", value=0.0, min_value=0.0, format="%.3f")
+    chamber_area_m2 = st.sidebar.number_input("Sediment footprint area (m^2)", value=0.0, min_value=0.0, format="%.4f")
+
     data_dir = Path(data_dir_input)
     if not data_dir.exists():
         st.error(f"Directory not found: {data_dir}")
@@ -875,7 +891,7 @@ def main() -> None:
     with measurements_tab:
         render_measurements_tab(tables, partial_pressure_sensitivity)
     with experiment_tab:
-        render_experiment_tab(tables, total_pressure_sensitivity)
+        render_experiment_tab(tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2)
 
 
 if __name__ == "__main__":

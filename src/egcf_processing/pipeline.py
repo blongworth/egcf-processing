@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from egcf_processing import aggregate, combine, cycles, discovery, reader, rga_scans
+from egcf_processing import aggregate, combine, cycles, discovery, flux, reader, rga_scans
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,8 @@ DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = aggregate.DEFAULT_TOTAL_PRESSURE
 def run(
     raw_dir: Path,
     out_dir: Path,
+    chamber_volume_l: float,
+    chamber_area_m2: float,
     settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
     output_format: str = DEFAULT_OUTPUT_FORMAT,
     partial_pressure_sensitivity_a_per_torr: float = DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
@@ -61,10 +63,14 @@ def run(
         total_pressure_sensitivity_a_per_torr,
     )
 
+    layer_d = flux.compute_fluxes(layer_c, chamber_volume_l, chamber_area_m2)
+
     scans_path = combine.write_df(layer_b, out_dir, "egcf_rga_scans", output_format)
     cycles_path = combine.write_df(layer_c, out_dir, "egcf_chamber_cycles", output_format)
+    fluxes_path = combine.write_df(layer_d, out_dir, "egcf_fluxes", output_format)
     logger.info("wrote rga_scans (%d rows) -> %s", layer_b.height, scans_path)
     logger.info("wrote chamber_cycles (%d rows) -> %s", layer_c.height, cycles_path)
+    logger.info("wrote fluxes (%d rows) -> %s", layer_d.height, fluxes_path)
 
     return {
         "n_files": len(files),
@@ -72,4 +78,5 @@ def run(
         "cycle_stats": cycle_stats,
         "layer_b_rows": layer_b.height,
         "layer_c_rows": layer_c.height,
+        "layer_d_rows": layer_d.height,
     }
