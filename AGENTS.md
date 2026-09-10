@@ -208,6 +208,51 @@ by dividing `mass_44_torr` by a guessed solubility — the nominal sensitivity m
 Torr values approximate (see the RGA conversion note above), so the result would look
 quantitative while being off by whatever the real SP/ST calibration factor is.
 
+### Planned: PAR from a co-deployed Odyssey logger
+
+An Odyssey submersible PAR logger is being co-deployed with the lander. **No parser is written
+yet, deliberately** — no real Odyssey export exists in `data/raw/` to check the format against,
+and this repo's standing rule is to read actual sample files rather than trust a spec (see the
+firmware-README warning at the top). Don't write one from an assumed format; wait for a file.
+
+Why it matters: without light, every O2 flux pools photosynthesis and respiration into a mean
+that means little for an eelgrass bed. With it, dark incubations give respiration (R), light ones
+give net community production (NCP = GPP − R), and GPP = NCP + |R|. It also cross-checks the
+other variables — pH rises in light and falls in dark, so H⁺ flux should anticorrelate with PAR.
+
+Agreed scope for Layer D once the data lands:
+
+- **PAR as a covariate** — mean and integrated PAR per chamber cycle on every flux row.
+- **Light/dark O2 partition** — classify each incubation by mean PAR; report R, NCP, GPP.
+- **P–I curve fit** — NCP vs PAR across all incubations (Jassby & Platt tanh), yielding Pmax, α,
+  saturation irradiance Ik, and dark R as the intercept. This is the real payoff of an
+  unattended lander doing many incubations at many irradiances.
+- Daily integrated metabolism was considered and **not** included in the initial scope.
+
+Structurally the Odyssey is unlike anything in the pipeline today: a **separately-clocked,
+separately-recovered logger**, not a payload in the lander's line grammar. Expected shape is a
+new discovery/reader path feeding a Layer A `par` table, which then rides the *existing*
+`aggregate.aggregate_onto_windows()` as one more source table (the case the "schema present even
+when empty" note below already anticipates) — not a parallel aggregation path.
+
+Instrument gotchas to handle explicitly, in rough order of how much damage each does:
+
+- **Clock offset is the top risk.** The Odyssey's RTC is set by PC at launch and drifts over a
+  multi-week deployment, and its software commonly writes **local time** while the lander runs
+  UTC. A silent 15-minute misalignment puts dawn/dusk incubations at the wrong irradiance and
+  quietly bends the whole P–I curve. Needed: launch time, timezone, and a recovery clock-check
+  if one was taken. Treat the offset as an explicit input, never inferred.
+- **Calibration state is unknown** — Odysseys log raw counts with per-unit calibration factors
+  and real unit-to-unit variability. Support both: read raw counts and accept a calibration
+  factor that defaults to pass-through, so an already-calibrated file works unchanged.
+- **Biofouling is a drift, not noise.** A fouling diffuser reads progressively low and
+  systematically bends P–I parameters across the deployment. Testable by checking whether
+  clear-sky noon maxima decline monotonically over the record.
+- **Chamber shading** — the logger sees ambient PAR; the enclosed sediment sees that minus what
+  the chamber walls and lid block. Correcting it needs the chamber's transmittance.
+- **Unit collision**: PAR is µmol photons m⁻² **s**⁻¹ while fluxes are µmol m⁻² **h**⁻¹. Name
+  the columns so the two can't be confused.
+
 ## Data format gotchas (confirmed against real files, not just the README)
 
 - **Only `gems_YYYY-MM-DD-HH-MM.txt` is in scope.** `data_*.txt`, `*_test*.txt`, `*_smurp*.txt`,
