@@ -92,6 +92,20 @@ def mass_color_map(masses: list[int]) -> dict[int, str]:
     return {m: _MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)] for i, m in enumerate(sorted(masses))}
 
 
+def chamber_color_map(chambers: list[str]) -> dict[str, str]:
+    """Assign each chamber a fixed color, keyed by its position in the sorted list.
+
+    Same rationale as mass_color_map: a given chamber must be the same color in
+    every plot on the tab, regardless of which subset a particular plot shows.
+    """
+    return {c: _MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)] for i, c in enumerate(sorted(chambers))}
+
+
+def flux_variable_units(fluxes: pl.DataFrame) -> dict[str, str]:
+    """Map each flux variable to its output_unit (constant per variable)."""
+    return dict(fluxes.select("variable", "output_unit").unique().iter_rows())
+
+
 def rga_current_to_unit(current: pl.Expr, unit: str, sensitivity_a_per_torr: float) -> pl.Expr:
     """Convert a raw RGA ion-current expression to the requested display unit."""
     if unit == "raw":
@@ -311,13 +325,21 @@ def _empty_state(name: str) -> None:
     st.info(f"No {name} data available in this dataset.")
 
 
-def _render_linked_timeseries(sections: list[tuple[str, list[go.Scatter], bool, bool]], title: str) -> None:
+def _render_linked_timeseries(
+    sections: list[tuple[str, list[go.Scatter], bool, bool]],
+    title: str,
+    zero_line: bool = False,
+) -> None:
     """Render one subplot per section, stacked with a shared, zoom/pan-linked time axis.
 
     Each section's third element requests scientific-notation y-axis ticks,
     for the Amps/Torr panels whose magnitudes (~1e-8 to 1e-16) are unreadable
     in plain decimal. The fourth element requests a log-scale y-axis, for the
     RGA mass-current panels whose values span several orders of magnitude.
+
+    ``zero_line`` draws a y=0 reference on every subplot -- for flux panels,
+    where the sign carries the meaning (efflux above the line, uptake below)
+    and the eye needs the crossing point.
     """
     sections = [(label, traces, sci, log_y) for label, traces, sci, log_y in sections if traces]
     if not sections:
@@ -330,6 +352,8 @@ def _render_linked_timeseries(sections: list[tuple[str, list[go.Scatter], bool, 
             fig.update_yaxes(exponentformat="e", row=i, col=1)
         if log_y:
             fig.update_yaxes(type="log", row=i, col=1)
+        if zero_line:
+            fig.add_hline(y=0, line={"color": _ZERO_LINE_COLOR, "width": 1}, row=i, col=1)
     fig.update_xaxes(matches="x")
     fig.update_layout(height=250 * len(sections), title=title)
     st.plotly_chart(fig, width="stretch")
@@ -697,27 +721,126 @@ def _render_experiment_fluxes(
     chamber_volume_l: float,
     chamber_area_m2: float,
 ) -> None:
-    """Show benthic flux for the selected experiment, both chambers.
+    """Show benthic flux: the selected experiment, then the whole deployment.
 
     Independent of the Variable selectbox above -- these are a fixed set of
     quantities (see flux.compute_fluxes), not user-selected ones.
+
+    The deployment-wide plot renders even when the *selected* experiment has
+    no fittable cycle, so landing on a thin experiment (experiment 1 in the
+    real corpus has one cycle per chamber) no longer looks like "no flux data"
+    when fits exist elsewhere in the deployment.
     """
     st.subheader("Benthic flux")
     if chamber_volume_l <= 0 or chamber_area_m2 <= 0:
         st.info("Enter the chamber volume and sediment footprint area in the sidebar to compute flux.")
         return
-    fluxes = compute_fluxes(with_experiment, chamber_volume_l, chamber_area_m2)
-    fluxes = fluxes.filter(pl.col("experiment_number").cast(pl.Utf8) == experiment)
-    if fluxes.is_empty():
-        st.info("Not enough cycles in this experiment to fit a flux.")
+    all_fluxes = compute_fluxes(with_experiment, chamber_volume_l, chamber_area_m2)
+    if all_fluxes.is_empty():
+        st.info("Not enough cycles in any experiment to fit a flux.")
         return
-    st.dataframe(
-        fluxes.select("chamber", "variable", "output_value", "output_unit", "slope_native_per_min", "r2", "n_points"),
-        width="stretch",
-    )
+
+    this_exp = all_fluxes.filter(pl.col("experiment_number").cast(pl.Utf8) == experiment)
+    if this_exp.is_empty():
+        st.info("Not enough cycles in this experiment to fit a flux -- see the deployment-wide plot below.")
+    else:
+        _render_experiment_flux_chart(this_exp, experiment)
+        st.dataframe(
+            this_exp.select(
+                "chamber", "variable", "output_value", "output_unit", "slope_native_per_min", "r2", "n_points"
+            ),
+            width="stretch",
+        )
+
+    _render_flux_over_time(all_fluxes)
+
+
+def _render_experiment_flux_chart(exp_fluxes: pl.DataFrame, experiment: str) -> None:
+    """Bar chart of one experiment's fluxes, one subplot per variable.
+
+    One subplot per variable rather than one grouped bar chart, because the
+    variables carry different units and magnitudes spanning four orders
+    (oxygen ~1e4 umol m-2 h-1 next to h_ion ~1e0) -- on a shared axis
+    everything but oxygen flattens to nothing.
+    """
+    variables = sorted(exp_fluxes["variable"].unique().to_list())
+    units = flux_variable_units(exp_fluxes)
+    chambers = sorted(exp_fluxes["chamber"].unique().to_list())
+    colors = chamber_color_map(chambers)
+    fig = make_subplots(rows=1, cols=len(variables), subplot_titles=[f"{v}<br><sub>{units[v]}</sub>" for v in variables])
+    for col, variable in enumerate(variables, start=1):
+        g = exp_fluxes.filter(pl.col("variable") == variable)
+        for chamber in chambers:
+            gc = g.filter(pl.col("chamber") == chamber)
+            if gc.is_empty():
+                continue
+            fig.add_trace(
+                go.Bar(
+                    x=[chamber],
+                    y=gc["output_value"],
+                    name=chamber,
+                    marker={"color": colors[chamber]},
+                    legendgroup=chamber,
+                    showlegend=col == 1,
+                    hovertemplate=f"{chamber}<br>{variable}=%{{y:.4g}} {units[variable]}<extra></extra>",
+                ),
+                row=1,
+                col=col,
+            )
+        fig.add_hline(y=0, line={"color": _ZERO_LINE_COLOR, "width": 1}, row=1, col=col)
+    fig.update_layout(height=340, title=f"Experiment {experiment}: flux by variable", barmode="group")
+    st.plotly_chart(fig, width="stretch")
+
+
+def _render_flux_over_time(all_fluxes: pl.DataFrame) -> None:
+    """Flux against experiment start across the whole deployment.
+
+    One stacked, x-linked subplot per selected variable (see
+    _render_experiment_flux_chart for why variables can't share an axis).
+    Never log-scaled and never forced non-negative: a flux's sign is its
+    meaning, and both directions are real.
+    """
+    variables = sorted(all_fluxes["variable"].unique().to_list())
+    selected = st.multiselect("Variables (flux over time)", variables, default=variables, key="flux_variables")
+    if not selected:
+        st.info("Select at least one variable to plot flux over time.")
+        return
+    units = flux_variable_units(all_fluxes)
+    chambers = sorted(all_fluxes["chamber"].unique().to_list())
+    colors = chamber_color_map(chambers)
+    sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
+    for variable in [v for v in variables if v in selected]:
+        g = all_fluxes.filter(pl.col("variable") == variable).sort("experiment_start")
+        traces = []
+        for chamber in chambers:
+            gc = g.filter(pl.col("chamber") == chamber)
+            if gc.is_empty():
+                continue
+            traces.append(
+                go.Scatter(
+                    x=gc["experiment_start"],
+                    y=gc["output_value"],
+                    mode="lines+markers",
+                    name=chamber,
+                    line={"color": colors[chamber]},
+                    marker={"color": colors[chamber]},
+                    legendgroup=chamber,
+                    showlegend=not sections,
+                    # n and r2 belong in the hover: a 2-point fit always has
+                    # r2=1.0, so the fit quality is only meaningful alongside n.
+                    text=[
+                        f"experiment {e} (n={n}, r²={r:.3f})"
+                        for e, n, r in zip(gc["experiment_number"], gc["n_points"], gc["r2"])
+                    ],
+                    hovertemplate="%{text}<br>%{x}<br>flux=%{y:.4g}<extra></extra>",
+                )
+            )
+        sections.append((f"{variable} ({units[variable]})", traces, False, False))
+    _render_linked_timeseries(sections, title="Flux over time", zero_line=True)
 
 
 _SETTLED_OUT_COLOR = "#B0B0B0"
+_ZERO_LINE_COLOR = "#888888"
 
 
 def _render_experiment_plot(
@@ -732,7 +855,7 @@ def _render_experiment_plot(
 ) -> None:
     fig = go.Figure()
     chambers = sorted(plot_df["chamber"].unique().to_list())
-    chamber_color = {c: _MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)] for i, c in enumerate(chambers)}
+    chamber_color = chamber_color_map(chambers)
     kept = plot_df.filter(~pl.col(settled_out_col)) if settled_out_col else plot_df
     for chamber in chambers:
         g = kept.filter(pl.col("chamber") == chamber)
@@ -792,7 +915,7 @@ def _render_experiment_rates_plot(rates_df: pl.DataFrame, variable_label: str, c
         return
     fig = go.Figure()
     chambers = sorted(rates_df["chamber"].unique().to_list())
-    chamber_color = {c: _MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)] for i, c in enumerate(chambers)}
+    chamber_color = chamber_color_map(chambers)
     for chamber in chambers:
         g = rates_df.filter(pl.col("chamber") == chamber)
         fig.add_trace(

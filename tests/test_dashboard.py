@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -7,9 +8,11 @@ from streamlit.testing.v1 import AppTest
 
 from egcf_processing.dashboard import (
     attach_experiment_context,
+    chamber_color_map,
     discover_masses,
     experiment_rates,
     experiment_start_times,
+    flux_variable_units,
     linear_fit,
     load_table,
     mass_color_map,
@@ -361,6 +364,133 @@ def test_experiment_tab_cycle_averages_shows_fit_and_rates_plot(tmp_path):
     assert "Started 2026-01-01 00:00:00" in main_spec
     rates_spec = charts[1].proto.spec
     assert "rate per experiment" in rates_spec
+
+
+def test_chamber_color_map_is_stable_regardless_of_input_order():
+    assert chamber_color_map(["C2", "C1"]) == chamber_color_map(["C1", "C2"])
+    assert len(set(chamber_color_map(["C1", "C2"]).values())) == 2
+
+
+def test_flux_variable_units():
+    fluxes = pl.DataFrame(
+        {
+            "variable": ["oxygen", "oxygen", "temp_degC"],
+            "output_unit": ["umol m-2 h-1", "umol m-2 h-1", "degC h-1"],
+        }
+    )
+    assert flux_variable_units(fluxes) == {"oxygen": "umol m-2 h-1", "temp_degC": "degC h-1"}
+
+
+def _write_two_experiments_one_thin(tmp_path):
+    """Experiment 1 gets a single cycle (unfittable); experiment 2 gets two.
+
+    experiment_number advances when a (C1, Re) follows a (C2, Fl), so the
+    C1 Fl -> C2 Fl pair in the middle closes experiment 1 after just one
+    measurement cycle.
+    """
+    valve_df = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, m) for m in (0, 5, 10, 15, 20, 25, 30)],
+            "chamber": ["C1", "C1", "C2", "C1", "C1", "C1", "C1"],
+            "flush_state": ["Re", "Fl", "Fl", "Re", "Fl", "Re", "Fl"],
+        }
+    )
+    valve_df.write_parquet(tmp_path / "valve.parquet")
+    stamps = [datetime(2026, 1, 1, 0, 2, 30), datetime(2026, 1, 1, 0, 17, 30), datetime(2026, 1, 1, 0, 27, 30)]
+    pl.DataFrame(
+        {
+            "ts": stamps,
+            "ts_scalup": stamps,
+            "temp_degc": [12.0, 12.0, 12.5],
+            "sal_psu": [32.0, 32.0, 32.0],
+            "pressure_mbar": [1013.0, 1013.0, 1013.0],
+            "oxygen_mgl": [8.0, 8.0, 7.0],
+            "ph": [8.1, 8.1, 8.0],
+        }
+    ).write_parquet(tmp_path / "scalup.parquet")
+
+
+def _flux_over_time_spec(tab):
+    for chart in tab.get("plotly_chart"):
+        spec = json.loads(chart.proto.spec)
+        title = spec.get("layout", {}).get("title") or {}
+        if "Flux over time" in (title.get("text") or ""):
+            return spec
+    return None
+
+
+def test_flux_over_time_renders_even_when_selected_experiment_has_no_fit(tmp_path):
+    # Landing on a thin experiment used to look like "no flux data at all"; the
+    # deployment-wide plot must still show the experiments that do have fits.
+    _write_two_experiments_one_thin(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value("Cycle averages").run(timeout=60)
+    at.sidebar.number_input[2].set_value(4.0).run(timeout=60)
+    at.sidebar.number_input[3].set_value(0.06).run(timeout=60)
+    assert not at.exception
+
+    tab = at.tabs[2]
+    # The selectbox value is the bare experiment number; only its label is formatted.
+    assert tab.selectbox(key="experiment_number").value == "1"
+    assert any("see the deployment-wide plot below" in i.value for i in tab.info)
+    assert not tab.dataframe  # no per-experiment table for the thin experiment
+    spec = _flux_over_time_spec(tab)
+    assert spec is not None and spec["data"]
+
+
+def test_flux_variable_selector_filters_the_flux_over_time_subplots(tmp_path):
+    _write_two_experiments_one_thin(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value("Cycle averages").run(timeout=60)
+    at.sidebar.number_input[2].set_value(4.0).run(timeout=60)
+    at.sidebar.number_input[3].set_value(0.06).run(timeout=60)
+
+    selector = at.tabs[2].multiselect(key="flux_variables")
+    assert selector.value == selector.options  # defaults to every variable
+    all_subplots = len(_flux_over_time_spec(at.tabs[2])["layout"]["annotations"])
+
+    at.tabs[2].multiselect(key="flux_variables").set_value(["oxygen"]).run(timeout=60)
+    assert not at.exception
+    spec = _flux_over_time_spec(at.tabs[2])
+    titles = [a["text"] for a in spec["layout"]["annotations"]]
+    assert len(titles) == 1 < all_subplots
+    assert titles[0].startswith("oxygen (umol m-2 h-1)")
+
+    at.tabs[2].multiselect(key="flux_variables").set_value([]).run(timeout=60)
+    assert not at.exception
+    assert _flux_over_time_spec(at.tabs[2]) is None
+    assert any("Select at least one variable" in i.value for i in at.tabs[2].info)
+
+
+def test_experiment_flux_bar_chart_has_one_subplot_per_variable(tmp_path):
+    _write_two_experiments_one_thin(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value("Cycle averages").run(timeout=60)
+    at.sidebar.number_input[2].set_value(4.0).run(timeout=60)
+    at.sidebar.number_input[3].set_value(0.06).run(timeout=60)
+    exp2 = [o for o in at.tabs[2].selectbox(key="experiment_number").options if o.startswith("2 ")][0]
+    at.tabs[2].selectbox(key="experiment_number").set_value(exp2).run(timeout=60)
+    assert not at.exception
+
+    charts = [json.loads(c.proto.spec) for c in at.tabs[2].get("plotly_chart")]
+    bars = [s for s in charts if "flux by variable" in ((s.get("layout", {}).get("title") or {}).get("text") or "")]
+    assert len(bars) == 1
+    spec = bars[0]
+    assert {d["type"] for d in spec["data"]} == {"bar"}
+    # Each variable gets its own x-axis: units and magnitudes don't share one.
+    assert len({d["xaxis"] for d in spec["data"]}) == len(spec["layout"]["annotations"])
+    # The chamber legend entry appears exactly once despite repeating per subplot.
+    assert sum(1 for d in spec["data"] if d.get("showlegend") and d.get("name") == "C1") == 1
+    assert at.tabs[2].dataframe  # exact numbers still available underneath
 
 
 def test_experiment_tab_flux_table_needs_chamber_geometry(tmp_path):

@@ -370,13 +370,40 @@ a cycle at the same elapsed time, collapsing them onto one x-position).
 (`#B0B0B0`) "dropped (settling)" trace instead of hiding them, while kept
 points still render per-chamber in their normal colors.
 
-Below the rate plot, `Cycle averages` also renders a **Benthic flux** table
-(`_render_experiment_fluxes`) for the selected experiment, calling the same
-`flux.compute_fluxes()` the pipeline uses against the live-built cycle-averaged
-table. It's deliberately independent of the Variable selectbox -- the flux
-quantities are a fixed set (see "Flux calculation"), not user-selected -- and is
+Below the rate plot, `Cycle averages` renders a **Benthic flux** section
+(`_render_experiment_fluxes`), calling the same `flux.compute_fluxes()` the
+pipeline uses against the live-built cycle-averaged table. It's deliberately
+independent of the Variable selectbox -- the flux quantities are a fixed set
+(see "Flux calculation"), not user-selected -- and the whole section is
 replaced by a prompt when the sidebar's chamber volume/area are still at their
-`0.0` defaults.
+`0.0` defaults. It has three parts:
+
+1. `_render_experiment_flux_chart` -- grouped bars of the selected experiment's
+   flux, **one subplot per variable**. Not one grouped bar chart: the variables
+   carry different units and magnitudes spanning four orders (oxygen ~1e4
+   µmol m⁻² h⁻¹ beside h_ion ~1e0), so on a shared axis everything but oxygen
+   flattens to nothing.
+2. The exact-numbers `st.dataframe` underneath.
+3. `_render_flux_over_time` -- flux against experiment start for the **whole
+   deployment**, with an `st.multiselect` (`key="flux_variables"`, defaults to
+   every variable) choosing which variables to show. One stacked, x-linked
+   subplot per selected variable, via the shared `_render_linked_timeseries`
+   with its `zero_line=True` option, which draws y=0 on each panel because a
+   flux's sign is its meaning (efflux above, uptake below). Never log-scaled
+   and never clamped non-negative, for the same reason.
+
+Parts 1 and 2 are skipped -- with an explanatory info message -- when the
+*selected* experiment has too few cycles to fit, but **part 3 still renders**.
+This matters against real data: experiment 1 in the surface corpus has one
+cycle per chamber, so the old table-only version showed "not enough cycles"
+and nothing else on load, even though 154 flux rows existed further into the
+deployment. `n_points` and `r2` ride in part 3's hover text rather than the
+axes, since a 2-point fit always has r²=1.0 and the number is only meaningful
+next to n.
+
+`chamber_color_map()` mirrors `mass_color_map()`'s rationale for chambers, and
+is shared by all three of the tab's chamber-colored plots so C1/C2 keep one
+color throughout.
 
 `Cycle averages` also fits a rate for the selected variable: `linear_fit()`
 is a plain ordinary-least-squares slope/intercept over `(elapsed_time_min,
