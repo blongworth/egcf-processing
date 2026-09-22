@@ -352,6 +352,23 @@ in minutes). The status tab's "current" plot is deliberately
 `STATUS_SCHEMA` besides the pressure ion current, which already gets its own
 plot; this was an explicit user choice, not a guess.
 
+The Status tab also plots `system_health.parquet` (supply voltage, supply current, Teensy
+temperature) below the turbo panels. Its two halves are guarded independently — either table
+alone renders, and the "No status data" empty state appears only when *both* are missing/empty.
+
+Both the Status and Measurements tabs carry a "Shade by active chamber" checkbox
+(`_chamber_shading_control`, keys `status_chamber_shading` / `measurements_chamber_shading`),
+rendered only when `valve.parquet` yields at least one span and off by default. The spans come
+from `active_chamber_spans()`, which is `cycles.chamber_cycle_windows(valve, settle_offset_s=0.0)`
+— i.e. exactly the measurement cycles, so shading lines up with the windows cycle averages are
+taken over; `Fl` spans stay unshaded. Remember this marks *which chamber is being sampled*, not
+which is incubating: both chambers stay sealed for the whole experiment. `_shade_chamber_spans()`
+draws **one shape per span in `yref="paper"` coordinates**, not one per (span, subplot): all
+subplots match the row-1 x axis, so a single band covers the whole stack, and a real deployment
+has ~1000 spans (× 7 panels would be ~7000 shapes for Plotly to render). Chamber colors come from
+the same `chamber_color_map` the Experiment Data tab uses, and a no-data marker trace per chamber
+supplies the legend entry.
+
 The Experiment Data tab's own "Grain" radio (`Full data` / `Cycle averages`)
 picks between `_render_experiment_full_data` and
 `_render_experiment_cycle_averages` -- both gated purely on the raw `valve`

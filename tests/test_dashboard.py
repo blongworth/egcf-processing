@@ -6,8 +6,9 @@ import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from egcf_processing.combine import STATUS_SCHEMA
+from egcf_processing.combine import STATUS_SCHEMA, VALVE_SCHEMA
 from egcf_processing.dashboard import (
+    active_chamber_spans,
     attach_experiment_context,
     chamber_color_map,
     discover_masses,
@@ -879,3 +880,103 @@ def test_status_tab_empty_state_when_both_tables_missing(tmp_path):
     _at, tab = _status_tab_spec(tmp_path)
     assert not tab.get("plotly_chart")
     assert "No status data" in tab.get("info")[0].value
+
+
+def _write_valve_two_chambers(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 0, 0, 10),
+                datetime(2026, 1, 1, 0, 0, 20),
+                datetime(2026, 1, 1, 0, 0, 30),
+            ],
+            "chamber": ["C1", "C2", "C2", "C1"],
+            "flush_state": ["Re", "Re", "Fl", "Re"],
+        }
+    ).write_parquet(tmp_path / "valve.parquet")
+
+
+def test_active_chamber_spans_from_valve_transitions():
+    valve = pl.DataFrame(
+        {
+            "ts": [
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 0, 0, 10),
+                datetime(2026, 1, 1, 0, 0, 20),
+                datetime(2026, 1, 1, 0, 0, 30),
+            ],
+            "chamber": ["C1", "C2", "C2", "C1"],
+            "flush_state": ["Re", "Re", "Fl", "Re"],
+        }
+    )
+    spans = active_chamber_spans(valve)
+    # The trailing (C1, Re) has no following transition, so it is not a span;
+    # the (C2, Fl) flush span is skipped.
+    assert spans.select("start", "end", "chamber").rows() == [
+        (datetime(2026, 1, 1, 0, 0, 0), datetime(2026, 1, 1, 0, 0, 10), "C1"),
+        (datetime(2026, 1, 1, 0, 0, 10), datetime(2026, 1, 1, 0, 0, 20), "C2"),
+    ]
+
+
+def test_active_chamber_spans_empty_without_valve_data():
+    assert active_chamber_spans(None).is_empty()
+    assert active_chamber_spans(pl.DataFrame(schema=VALVE_SCHEMA)).is_empty()
+    assert active_chamber_spans(None).columns == ["start", "end", "chamber"]
+
+
+def test_status_tab_chamber_shading_toggle_draws_bands(tmp_path):
+    _write_status(tmp_path)
+    _write_valve_two_chambers(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+
+    shade = [c for c in at.tabs[0].get("checkbox") if c.label == "Shade by active chamber"][0]
+    assert shade.value is False
+    assert not json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)["layout"].get("shapes")
+
+    shade.set_value(True).run(timeout=60)
+    assert not at.exception
+    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
+    shapes = spec["layout"]["shapes"]
+    assert len(shapes) == 2
+    assert {s["fillcolor"] for s in shapes} == set(chamber_color_map(["C1", "C2"]).values())
+    # One band spanning the whole stacked figure, behind the traces.
+    assert all(s["yref"] == "paper" and s["layer"] == "below" for s in shapes)
+    assert [d["name"] for d in spec["data"] if d["name"].endswith("active")] == ["C1 active", "C2 active"]
+
+
+def test_measurements_tab_chamber_shading_toggle_draws_bands(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, i) for i in range(4)],
+            "mass": [2, 40, 2, 40],
+            "current": [10.0, 100.0, 20.0, 200.0],
+        }
+    ).write_parquet(tmp_path / "rga.parquet")
+    _write_valve_two_chambers(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+
+    shade = [c for c in at.tabs[1].get("checkbox") if c.label == "Shade by active chamber"][0]
+    shade.set_value(True).run(timeout=60)
+    assert not at.exception
+    spec = json.loads(at.tabs[1].get("plotly_chart")[0].proto.spec)
+    assert len(spec["layout"]["shapes"]) == 2
+
+
+def test_chamber_shading_toggle_absent_without_valve_data(tmp_path):
+    _write_status(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+    assert not [c for c in at.tabs[0].get("checkbox") if c.label == "Shade by active chamber"]
+    assert not [c for c in at.tabs[1].get("checkbox") if c.label == "Shade by active chamber"]

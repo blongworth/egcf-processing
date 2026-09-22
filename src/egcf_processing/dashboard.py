@@ -325,10 +325,70 @@ def _empty_state(name: str) -> None:
     st.info(f"No {name} data available in this dataset.")
 
 
+_CHAMBER_SHADE_OPACITY = 0.12
+
+_CHAMBER_SPANS_SCHEMA = {"start": pl.Datetime, "end": pl.Datetime, "chamber": pl.Utf8}
+
+
+def active_chamber_spans(valve: pl.DataFrame | None) -> pl.DataFrame:
+    """[start, end) spans over which each chamber is the one being sampled.
+
+    These are exactly Layer C's measurement cycles with no settling offset (a
+    V: transition into (chamber, Re) up to the next transition), so the
+    shading lines up with the windows the cycle averages are taken over. The
+    Fl (flush) spans between them are left unshaded -- and note a chamber
+    stays a sealed incubation across the whole experiment, so an unshaded gap
+    means "not being sampled", not "not incubating".
+    """
+    if valve is None or valve.is_empty():
+        return pl.DataFrame(schema=_CHAMBER_SPANS_SCHEMA)
+    windows, _ = chamber_cycle_windows(valve, settle_offset_s=0.0)
+    return windows.select(
+        pl.col("window_start").alias("start"), pl.col("window_end").alias("end"), pl.col("chamber")
+    )
+
+
+def _shade_chamber_spans(fig: go.Figure, spans: pl.DataFrame) -> None:
+    """Draw each span as one full-height band behind the traces, colored by chamber.
+
+    One shape per span in paper-y coordinates rather than one per
+    (span, subplot): every subplot matches the row-1 x axis, so a single band
+    covers the whole stack -- which matters because a real deployment has
+    hundreds of spans and Plotly renders every shape separately.
+    """
+    colors = chamber_color_map(spans["chamber"].unique().to_list())
+    for start, end, chamber in spans.select("start", "end", "chamber").iter_rows():
+        fig.add_shape(
+            type="rect",
+            xref="x",
+            yref="paper",
+            x0=start,
+            x1=end,
+            y0=0,
+            y1=1,
+            fillcolor=colors[chamber],
+            opacity=_CHAMBER_SHADE_OPACITY,
+            line_width=0,
+            layer="below",
+        )
+    for chamber in sorted(colors):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker={"color": colors[chamber], "size": 10, "symbol": "square"},
+                opacity=_CHAMBER_SHADE_OPACITY * 3,
+                name=f"{chamber} active",
+            )
+        )
+
+
 def _render_linked_timeseries(
     sections: list[tuple[str, list[go.Scatter], bool, bool]],
     title: str,
     zero_line: bool = False,
+    chamber_spans: pl.DataFrame | None = None,
 ) -> None:
     """Render one subplot per section, stacked with a shared, zoom/pan-linked time axis.
 
@@ -340,6 +400,9 @@ def _render_linked_timeseries(
     ``zero_line`` draws a y=0 reference on every subplot -- for flux panels,
     where the sign carries the meaning (efflux above the line, uptake below)
     and the eye needs the crossing point.
+
+    ``chamber_spans`` (see active_chamber_spans) shades the background by
+    which chamber was being sampled at that time.
     """
     sections = [(label, traces, sci, log_y) for label, traces, sci, log_y in sections if traces]
     if not sections:
@@ -355,6 +418,8 @@ def _render_linked_timeseries(
         if zero_line:
             fig.add_hline(y=0, line={"color": _ZERO_LINE_COLOR, "width": 1}, row=i, col=1)
     fig.update_xaxes(matches="x")
+    if chamber_spans is not None and not chamber_spans.is_empty():
+        _shade_chamber_spans(fig, chamber_spans)
     fig.update_layout(height=250 * len(sections), title=title)
     st.plotly_chart(fig, width="stretch")
 
@@ -374,6 +439,20 @@ def total_pressure_torr(status: pl.DataFrame, total_pressure_sensitivity: float)
     ).with_columns((pl.col("total_pressure_amps") / total_pressure_sensitivity).alias("total_pressure_torr"))
 
 
+def _chamber_shading_control(valve: pl.DataFrame | None, key: str) -> pl.DataFrame | None:
+    """Offer the "shade by active chamber" toggle, returning the spans to shade.
+
+    Returns None when there is no valve data to derive spans from (the toggle
+    is not rendered at all in that case) or when the toggle is off.
+    """
+    spans = active_chamber_spans(valve)
+    if spans.is_empty():
+        return None
+    if not st.checkbox("Shade by active chamber", value=False, key=key):
+        return None
+    return spans
+
+
 def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sensitivity: float) -> None:
     status = tables["status"]
     system_health = tables["system_health"]
@@ -382,6 +461,8 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
     if not have_status and not have_system_health:
         _empty_state("status")
         return
+
+    chamber_spans = _chamber_shading_control(tables["valve"], key="status_chamber_shading")
 
     sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
     if have_status:
@@ -439,7 +520,7 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
             for col, label in _SYSTEM_HEALTH_PANELS
         ]
 
-    _render_linked_timeseries(sections, title="Status")
+    _render_linked_timeseries(sections, title="Status", chamber_spans=chamber_spans)
 
 
 def render_measurements_tab(
@@ -448,6 +529,7 @@ def render_measurements_tab(
 ) -> None:
     unit = st.radio("Unit", ["raw", "amps", "torr"], horizontal=True, key="measurements_unit")
     sci = unit in ("amps", "torr")
+    chamber_spans = _chamber_shading_control(tables["valve"], key="measurements_chamber_shading")
     sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
 
     rga = tables["rga"]
@@ -515,7 +597,7 @@ def render_measurements_tab(
                     (label, [go.Scatter(x=scalup["ts"], y=scalup[actual_col], mode="lines", name=col)], False, False)
                 )
 
-    _render_linked_timeseries(sections, title="Measurements")
+    _render_linked_timeseries(sections, title="Measurements", chamber_spans=chamber_spans)
 
 
 def _elapsed_minutes_expr() -> pl.Expr:
