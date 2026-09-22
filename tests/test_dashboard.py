@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -9,7 +9,10 @@ from streamlit.testing.v1 import AppTest
 from egcf_processing.combine import STATUS_SCHEMA, VALVE_SCHEMA
 from egcf_processing.dashboard import (
     active_chamber_spans,
+    align_slider_bounds,
+    date_range_bounds,
     filter_tables_to_range,
+    preset_time_range,
     table_ts_col,
     tables_time_bounds,
     attach_experiment_context,
@@ -1019,33 +1022,106 @@ def test_filter_tables_to_range_is_inclusive_and_leaves_untimestamped_tables_alo
     assert filtered["other"].height == 2
 
 
-def test_sidebar_time_range_filter_narrows_the_plotted_data(tmp_path):
+def test_preset_time_range_anchors_at_the_end_of_the_data():
+    lo, hi = datetime(2026, 8, 13, 18, 23, 12), datetime(2026, 9, 21, 17, 55, 36)
+    assert preset_time_range("All data", lo, hi) == (lo, hi)
+    assert preset_time_range("Last 24 hours", lo, hi) == (datetime(2026, 9, 20, 17, 55, 36), hi)
+    # A window longer than the dataset clamps to the dataset, it does not run off the front.
+    assert preset_time_range("Last 7 days", lo, datetime(2026, 8, 14)) == (lo, datetime(2026, 8, 14))
+
+
+def test_date_range_bounds_widens_to_whole_days_and_clamps():
+    lo, hi = datetime(2026, 9, 20, 6, 30), datetime(2026, 9, 21, 17, 55, 36)
+    assert date_range_bounds((date(2026, 9, 20), date(2026, 9, 21)), lo, hi) == (lo, hi)
+    assert date_range_bounds((date(2026, 9, 21),), lo, hi) == (datetime(2026, 9, 21), hi)
+    assert date_range_bounds(date(2026, 9, 21), lo, hi) == (datetime(2026, 9, 21), hi)
+
+
+def test_align_slider_bounds_makes_the_upper_bound_reachable():
+    step = timedelta(minutes=1)
+    lo, hi = datetime(2026, 9, 21), datetime(2026, 9, 21, 17, 55, 36)
+    aligned_lo, aligned_hi = align_slider_bounds(lo, hi, step)
+    assert aligned_lo == lo
+    assert aligned_hi == datetime(2026, 9, 21, 17, 56)
+    # Reachable means an exact whole number of steps from the lower bound, and
+    # never short of the real maximum.
+    assert (aligned_hi - aligned_lo) % step == timedelta(0)
+    assert aligned_hi >= hi
+
+
+def test_align_slider_bounds_leaves_an_exact_multiple_alone():
+    step = timedelta(minutes=1)
+    lo, hi = datetime(2026, 9, 21), datetime(2026, 9, 21, 0, 30)
+    assert align_slider_bounds(lo, hi, step) == (lo, hi)
+
+
+def test_align_slider_bounds_keeps_at_least_one_step():
+    step = timedelta(minutes=1)
+    lo = datetime(2026, 9, 21)
+    assert align_slider_bounds(lo, lo, step) == (lo, lo + step)
+
+
+def _write_system_health_over(tmp_path, stamps):
     pl.DataFrame(
         {
-            "ts": [datetime(2026, 1, 1, 0, m) for m in range(10)],
-            "voltage_v": [24.0 + m for m in range(10)],
-            "current_a": [0.03] * 10,
-            "teensy_temp_c": [50.0] * 10,
+            "ts": stamps,
+            "voltage_v": [24.0] * len(stamps),
+            "current_a": [0.03] * len(stamps),
+            "teensy_temp_c": [50.0] * len(stamps),
         }
     ).write_parquet(tmp_path / "system_health.parquet")
+
+
+def _status_points(at):
+    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
+    return spec["data"][0]["x"]
+
+
+def test_sidebar_time_range_preset_narrows_the_plotted_data(tmp_path):
+    _write_system_health_over(tmp_path, [datetime(2026, 1, 1, h) for h in range(6)])
 
     at = AppTest.from_file(str(DASHBOARD_PATH))
     at.run(timeout=60)
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     assert not at.exception
 
-    slider = at.sidebar.slider[0]
-    assert slider.value == (datetime(2026, 1, 1, 0, 0), datetime(2026, 1, 1, 0, 9))
-    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
-    assert len(spec["data"][0]["x"]) == 10
+    preset = at.sidebar.selectbox[0]
+    assert preset.label == "Preset"
+    assert preset.value == "All data"
+    assert len(_status_points(at)) == 6
 
-    slider.set_range(datetime(2026, 1, 1, 0, 2), datetime(2026, 1, 1, 0, 4)).run(timeout=60)
+    preset.set_value("Last hour").run(timeout=60)
     assert not at.exception
-    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
-    assert len(spec["data"][0]["x"]) == 3
+    assert len(_status_points(at)) == 2
 
     # The overview still describes the whole dataset, not the visible slice.
-    assert any("10 rows" in m.value for m in at.get("markdown"))
+    assert any("6 rows" in m.value for m in at.get("markdown"))
+
+
+def test_sidebar_custom_time_range_can_reach_the_final_partial_day(tmp_path):
+    # Two days of data ending at an awkward 17:55:36 -- with a whole-day slider
+    # step this tail was unselectable.
+    stamps = [datetime(2026, 9, 20, 12), datetime(2026, 9, 21, 0, 30), datetime(2026, 9, 21, 17, 55, 36)]
+    _write_system_health_over(tmp_path, stamps)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.sidebar.selectbox[0].set_value("Custom").run(timeout=60)
+    assert not at.exception
+
+    at.sidebar.date_input[0].set_value((date(2026, 9, 21), date(2026, 9, 21))).run(timeout=60)
+    assert not at.exception
+
+    fine = at.sidebar.slider[0]
+    assert fine.value == (datetime(2026, 9, 21), datetime(2026, 9, 21, 17, 56))
+    points = _status_points(at)
+    assert len(points) == 2
+    assert points[-1].startswith("2026-09-21T17:55:36")
+
+    fine.set_range(datetime(2026, 9, 21), datetime(2026, 9, 21, 1)).run(timeout=60)
+    assert not at.exception
+    assert len(_status_points(at)) == 1
 
 
 def test_sidebar_time_range_filter_absent_for_a_single_instant_dataset(tmp_path):
@@ -1064,4 +1140,5 @@ def test_sidebar_time_range_filter_absent_for_a_single_instant_dataset(tmp_path)
     at.run(timeout=60)
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     assert not at.exception
+    assert not at.sidebar.selectbox
     assert not at.sidebar.slider

@@ -117,6 +117,96 @@ def filter_tables_to_range(
     return filtered
 
 
+TIME_RANGE_PRESETS: dict[str, timedelta | None] = {
+    "All data": None,
+    "Last hour": timedelta(hours=1),
+    "Last 6 hours": timedelta(hours=6),
+    "Last 24 hours": timedelta(days=1),
+    "Last 7 days": timedelta(days=7),
+}
+
+CUSTOM_TIME_RANGE = "Custom"
+
+_FINE_STEP = timedelta(minutes=1)
+
+
+def preset_time_range(preset: str, lo: datetime, hi: datetime) -> tuple[datetime, datetime]:
+    """Resolve a named preset to an absolute range, anchored at the *end* of the data.
+
+    Anchoring at ``hi`` rather than "now" is what makes these useful on an
+    already-recovered deployment, where the data is weeks old.
+    """
+    window = TIME_RANGE_PRESETS[preset]
+    if window is None:
+        return lo, hi
+    return max(lo, hi - window), hi
+
+
+def date_range_bounds(dates, lo: datetime, hi: datetime) -> tuple[datetime, datetime]:
+    """Widen a selected date (or first/last of a date range) to whole-day bounds, clamped to the data.
+
+    ``st.date_input`` in range mode returns a 1-tuple mid-selection, before the
+    second date is picked -- that is treated as a single day, not an error.
+    """
+    selected = list(dates) if isinstance(dates, (list, tuple)) else [dates]
+    if not selected:
+        return lo, hi
+    start = datetime.combine(selected[0], datetime.min.time())
+    end = datetime.combine(selected[-1], datetime.max.time())
+    return max(lo, start), min(hi, end)
+
+
+def align_slider_bounds(lo: datetime, hi: datetime, step: timedelta) -> tuple[datetime, datetime]:
+    """Round the upper bound up so it sits on a whole number of steps from the lower.
+
+    st.slider only offers positions at ``min_value + k * step``, so unless the
+    span is an exact multiple of the step the true maximum is unreachable --
+    which is why the tail of a deployment could not be selected with the
+    default (1-day) step. Overshooting past the last sample is harmless: the
+    filter is inclusive and there is no data beyond it.
+    """
+    steps = max(-((lo - hi) // step), 1)
+    return lo, lo + step * steps
+
+
+def render_time_range_control(bounds: tuple[datetime, datetime]) -> tuple[datetime, datetime]:
+    """Sidebar time-range picker: presets, plus a two-stage day + fine-time custom mode.
+
+    A single slider over the whole deployment cannot resolve short windows (a
+    39-day span is hours per pixel), so custom mode narrows by calendar day
+    first and only then offers a minute-resolution slider *within* those days.
+    """
+    lo, hi = bounds
+    st.header("Time range")
+    st.caption("Applies to the Status and Measurements tabs; the Experiment Data tab has its own selector.")
+    preset = st.selectbox("Preset", [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE], key="time_range_preset")
+
+    if preset != CUSTOM_TIME_RANGE:
+        start, end = preset_time_range(preset, lo, hi)
+    else:
+        dates = st.date_input(
+            "Days",
+            value=(lo.date(), hi.date()),
+            min_value=lo.date(),
+            max_value=hi.date(),
+            key="time_range_days",
+        )
+        day_lo, day_hi = date_range_bounds(dates, lo, hi)
+        slider_lo, slider_hi = align_slider_bounds(day_lo, day_hi, _FINE_STEP)
+        # Deliberately unkeyed: changing the day selection changes the widget's
+        # min/max, and the reset back to the full selected span is what we want.
+        start, end = st.slider(
+            "Time within those days",
+            min_value=slider_lo,
+            max_value=slider_hi,
+            value=(slider_lo, slider_hi),
+            step=_FINE_STEP,
+        )
+
+    st.caption(f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}")
+    return start, end
+
+
 def discover_masses(df: pl.DataFrame) -> list[int]:
     """Discover mass ids from mass_{m}_{suffix} columns, sorted ascending."""
     return sorted({int(c.split("_")[1]) for c in df.columns if c.startswith("mass_")})
@@ -1168,16 +1258,7 @@ def main() -> None:
     bounds = tables_time_bounds(tables)
     if bounds is not None and bounds[0] < bounds[1]:
         with time_range_slot:
-            st.header("Time range")
-            st.caption("Applies to the Status and Measurements tabs; the Experiment Data tab has its own selector.")
-            start, end = st.slider(
-                "Time range",
-                min_value=bounds[0],
-                max_value=bounds[1],
-                value=bounds,
-                key="time_range",
-                label_visibility="collapsed",
-            )
+            start, end = render_time_range_control(bounds)
         plot_tables = filter_tables_to_range(tables, start, end)
 
     status_tab, measurements_tab, experiment_tab = st.tabs(["Status", "Measurements", "Experiment Data"])

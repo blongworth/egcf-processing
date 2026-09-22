@@ -352,20 +352,39 @@ in minutes). The status tab's "current" plot is deliberately
 `STATUS_SCHEMA` besides the pressure ion current, which already gets its own
 plot; this was an explicit user choice, not a guess.
 
-A sidebar **"Time range"** range slider (`key="time_range"`, datetime-valued) prefilters the
-loaded tables before any plotting. Its bounds come from `tables_time_bounds()` (min/max over every
-loaded table's time column, `timestamp` for Layer B/C and `ts` for Layer A -- see `table_ts_col`)
-and it is skipped entirely for a dataset spanning a single instant, where a slider would have
-`min_value == max_value`. `filter_tables_to_range()` then slices every timestamped table once, up
-front, and the *filtered* dict is what the Status and Measurements tabs receive -- so unit
+The sidebar **"Time range"** control prefilters the loaded tables before any plotting. Its bounds
+come from `tables_time_bounds()` (min/max over every loaded table's time column, `timestamp` for
+Layer B/C and `ts` for Layer A -- see `table_ts_col`), and the whole control is skipped for a
+dataset spanning a single instant. `filter_tables_to_range()` then slices every timestamped table
+once, up front, and the *filtered* dict is what the Status and Measurements tabs receive -- so unit
 conversion, ratio joins and cycle-window detection all run over the visible slice rather than the
 whole deployment (a one-day window over the ~1.2M-row real corpus cuts a rerun from ~2.3 s to
-~0.4 s). Two deliberate exclusions: `render_overview` is given the *unfiltered* tables, since it
-describes the dataset rather than the view; and so is the Experiment Data tab, because it derives
-`experiment_number` live from the complete `valve` sequence and a truncated sequence would
-silently renumber experiments. The slider widget is created *after* the data loads (its bounds
-depend on it) but rendered into a `st.sidebar.container()` reserved earlier, so it still appears
-directly below the data-source controls.
+~0.35 s).
+
+Two deliberate exclusions: `render_overview` is given the *unfiltered* tables, since it describes
+the dataset rather than the view; and so is the Experiment Data tab, because it derives
+`experiment_number` live from the complete `valve` sequence and a truncated sequence would silently
+renumber experiments. The control is created *after* the data loads (its bounds depend on it) but
+rendered into a `st.sidebar.container()` reserved earlier, so it still appears directly below the
+data-source controls.
+
+`render_time_range_control()` is a **preset selectbox plus a two-stage custom mode**, and both
+halves exist to fix specific failures of the single full-span range slider it replaced:
+
+- `TIME_RANGE_PRESETS` (All data / Last hour / 6 hours / 24 hours / 7 days) resolve via
+  `preset_time_range()`, anchored at the **end of the data**, not at "now" -- these are recovered
+  deployments, weeks old, so a wall-clock anchor would always select nothing.
+- Custom mode picks calendar days first (`st.date_input`) and only then offers a 1-minute-step
+  slider *within* those days. A single slider across a 39-day deployment is hours per pixel, so
+  short windows were undraggable. `date_range_bounds()` tolerates the 1-tuple `st.date_input`
+  returns mid-selection (before the second date is picked), treating it as a single day.
+- `align_slider_bounds()` rounds the slider's upper bound **up** to a whole number of steps.
+  `st.slider` only offers positions at `min_value + k * step`, so unless the span is an exact
+  multiple of the step the true maximum is unreachable -- with the default 1-day step this made
+  the final partial day of a deployment impossible to select. Overshooting the last sample is
+  harmless because the filter is inclusive.
+- The fine slider is deliberately **unkeyed**: changing the day selection changes its min/max, and
+  resetting to the full newly-selected span is the wanted behavior.
 
 The Status tab also plots `system_health.parquet` (supply voltage, supply current, Teensy
 temperature) below the turbo panels. Its two halves are guarded independently — either table
