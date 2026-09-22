@@ -352,6 +352,21 @@ in minutes). The status tab's "current" plot is deliberately
 `STATUS_SCHEMA` besides the pressure ion current, which already gets its own
 plot; this was an explicit user choice, not a guess.
 
+A sidebar **"Time range"** range slider (`key="time_range"`, datetime-valued) prefilters the
+loaded tables before any plotting. Its bounds come from `tables_time_bounds()` (min/max over every
+loaded table's time column, `timestamp` for Layer B/C and `ts` for Layer A -- see `table_ts_col`)
+and it is skipped entirely for a dataset spanning a single instant, where a slider would have
+`min_value == max_value`. `filter_tables_to_range()` then slices every timestamped table once, up
+front, and the *filtered* dict is what the Status and Measurements tabs receive -- so unit
+conversion, ratio joins and cycle-window detection all run over the visible slice rather than the
+whole deployment (a one-day window over the ~1.2M-row real corpus cuts a rerun from ~2.3 s to
+~0.4 s). Two deliberate exclusions: `render_overview` is given the *unfiltered* tables, since it
+describes the dataset rather than the view; and so is the Experiment Data tab, because it derives
+`experiment_number` live from the complete `valve` sequence and a truncated sequence would
+silently renumber experiments. The slider widget is created *after* the data loads (its bounds
+depend on it) but rendered into a `st.sidebar.container()` reserved earlier, so it still appears
+directly below the data-source controls.
+
 The Status tab also plots `system_health.parquet` (supply voltage, supply current, Teensy
 temperature) below the turbo panels. Its two halves are guarded independently — either table
 alone renders, and the "No status data" empty state appears only when *both* are missing/empty.

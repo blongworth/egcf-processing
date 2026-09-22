@@ -9,6 +9,9 @@ from streamlit.testing.v1 import AppTest
 from egcf_processing.combine import STATUS_SCHEMA, VALVE_SCHEMA
 from egcf_processing.dashboard import (
     active_chamber_spans,
+    filter_tables_to_range,
+    table_ts_col,
+    tables_time_bounds,
     attach_experiment_context,
     chamber_color_map,
     discover_masses,
@@ -980,3 +983,85 @@ def test_chamber_shading_toggle_absent_without_valve_data(tmp_path):
     assert not at.exception
     assert not [c for c in at.tabs[0].get("checkbox") if c.label == "Shade by active chamber"]
     assert not [c for c in at.tabs[1].get("checkbox") if c.label == "Shade by active chamber"]
+
+
+def test_table_ts_col_prefers_timestamp_over_ts():
+    assert table_ts_col(pl.DataFrame({"ts": [1]})) == "ts"
+    assert table_ts_col(pl.DataFrame({"timestamp": [1], "ts": [1]})) == "timestamp"
+    assert table_ts_col(pl.DataFrame({"mass": [1]})) is None
+
+
+def test_tables_time_bounds_spans_every_timestamped_table():
+    tables = {
+        "rga": pl.DataFrame({"ts": [datetime(2026, 1, 1, 0, 5), datetime(2026, 1, 1, 0, 9)]}),
+        "egcf_chamber_cycles": pl.DataFrame({"timestamp": [datetime(2026, 1, 1, 0, 1)]}),
+        "status": None,
+        "valve": pl.DataFrame(schema={"ts": pl.Datetime}),
+    }
+    assert tables_time_bounds(tables) == (datetime(2026, 1, 1, 0, 1), datetime(2026, 1, 1, 0, 9))
+
+
+def test_tables_time_bounds_none_without_any_timestamps():
+    assert tables_time_bounds({"status": None, "rga": pl.DataFrame(schema={"ts": pl.Datetime})}) is None
+
+
+def test_filter_tables_to_range_is_inclusive_and_leaves_untimestamped_tables_alone():
+    tables = {
+        "rga": pl.DataFrame({"ts": [datetime(2026, 1, 1, 0, m) for m in range(5)], "mass": list(range(5))}),
+        "egcf_chamber_cycles": pl.DataFrame({"timestamp": [datetime(2026, 1, 1, 0, m) for m in range(5)]}),
+        "status": None,
+        "other": pl.DataFrame({"mass": [1, 2]}),
+    }
+    filtered = filter_tables_to_range(tables, datetime(2026, 1, 1, 0, 1), datetime(2026, 1, 1, 0, 3))
+    assert filtered["rga"]["mass"].to_list() == [1, 2, 3]
+    assert filtered["egcf_chamber_cycles"].height == 3
+    assert filtered["status"] is None
+    assert filtered["other"].height == 2
+
+
+def test_sidebar_time_range_filter_narrows_the_plotted_data(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, m) for m in range(10)],
+            "voltage_v": [24.0 + m for m in range(10)],
+            "current_a": [0.03] * 10,
+            "teensy_temp_c": [50.0] * 10,
+        }
+    ).write_parquet(tmp_path / "system_health.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+
+    slider = at.sidebar.slider[0]
+    assert slider.value == (datetime(2026, 1, 1, 0, 0), datetime(2026, 1, 1, 0, 9))
+    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
+    assert len(spec["data"][0]["x"]) == 10
+
+    slider.set_range(datetime(2026, 1, 1, 0, 2), datetime(2026, 1, 1, 0, 4)).run(timeout=60)
+    assert not at.exception
+    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
+    assert len(spec["data"][0]["x"]) == 3
+
+    # The overview still describes the whole dataset, not the visible slice.
+    assert any("10 rows" in m.value for m in at.get("markdown"))
+
+
+def test_sidebar_time_range_filter_absent_for_a_single_instant_dataset(tmp_path):
+    _write_status(tmp_path)
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, 5)],
+            "voltage_v": [24.0],
+            "current_a": [0.03],
+            "teensy_temp_c": [50.0],
+        }
+    ).write_parquet(tmp_path / "system_health.parquet")
+    pl.read_parquet(tmp_path / "status.parquet").head(1).write_parquet(tmp_path / "status.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+    assert not at.sidebar.slider

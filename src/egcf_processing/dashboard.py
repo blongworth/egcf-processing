@@ -76,6 +76,47 @@ def load_all(data_dir: Path) -> dict[str, pl.DataFrame | None]:
     return tables
 
 
+def table_ts_col(df: pl.DataFrame) -> str | None:
+    """Name of a table's time column: `timestamp` for Layer B/C, `ts` for Layer A."""
+    for candidate in ("timestamp", "ts"):
+        if candidate in df.columns:
+            return candidate
+    return None
+
+
+def tables_time_bounds(tables: dict[str, pl.DataFrame | None]) -> tuple[datetime, datetime] | None:
+    """Earliest and latest timestamp across every loaded table, or None if there is none."""
+    stamps = []
+    for df in tables.values():
+        if df is None or df.is_empty():
+            continue
+        ts_col = table_ts_col(df)
+        if ts_col is None:
+            continue
+        lo, hi = df[ts_col].min(), df[ts_col].max()
+        if lo is not None and hi is not None:
+            stamps.append((lo, hi))
+    if not stamps:
+        return None
+    return min(lo for lo, _ in stamps), max(hi for _, hi in stamps)
+
+
+def filter_tables_to_range(
+    tables: dict[str, pl.DataFrame | None], start: datetime, end: datetime
+) -> dict[str, pl.DataFrame | None]:
+    """Restrict every timestamped table to [start, end], inclusive.
+
+    Done once up front so each tab's plotting -- and the transforms feeding it
+    (unit conversion, ratio joins, cycle-window detection) -- runs over the
+    visible slice instead of the whole deployment.
+    """
+    filtered = {}
+    for name, df in tables.items():
+        ts_col = None if df is None else table_ts_col(df)
+        filtered[name] = df if ts_col is None else df.filter(pl.col(ts_col).is_between(start, end))
+    return filtered
+
+
 def discover_masses(df: pl.DataFrame) -> list[int]:
     """Discover mass ids from mass_{m}_{suffix} columns, sorted ascending."""
     return sorted({int(c.split("_")[1]) for c in df.columns if c.startswith("mass_")})
@@ -1083,7 +1124,7 @@ def render_overview(tables: dict[str, pl.DataFrame | None]) -> None:
             if df is None:
                 st.write(f"**{name}**: not found")
                 continue
-            ts_col = "timestamp" if "timestamp" in df.columns else "ts" if "ts" in df.columns else None
+            ts_col = table_ts_col(df)
             time_range = ""
             if ts_col and not df.is_empty():
                 time_range = f", {df[ts_col].min()} -> {df[ts_col].max()}"
@@ -1098,6 +1139,7 @@ def main() -> None:
     data_dir_input = st.sidebar.text_input("Processed data directory", value="data/processed/surface")
     if st.sidebar.button("Reload data"):
         st.cache_data.clear()
+    time_range_slot = st.sidebar.container()
     partial_pressure_sensitivity = st.sidebar.number_input(
         "Partial pressure sensitivity (A/Torr)",
         value=DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
@@ -1122,11 +1164,27 @@ def main() -> None:
     tables = st.cache_data(load_all)(data_dir)
     render_overview(tables)
 
+    plot_tables = tables
+    bounds = tables_time_bounds(tables)
+    if bounds is not None and bounds[0] < bounds[1]:
+        with time_range_slot:
+            st.header("Time range")
+            st.caption("Applies to the Status and Measurements tabs; the Experiment Data tab has its own selector.")
+            start, end = st.slider(
+                "Time range",
+                min_value=bounds[0],
+                max_value=bounds[1],
+                value=bounds,
+                key="time_range",
+                label_visibility="collapsed",
+            )
+        plot_tables = filter_tables_to_range(tables, start, end)
+
     status_tab, measurements_tab, experiment_tab = st.tabs(["Status", "Measurements", "Experiment Data"])
     with status_tab:
-        render_status_tab(tables, total_pressure_sensitivity)
+        render_status_tab(plot_tables, total_pressure_sensitivity)
     with measurements_tab:
-        render_measurements_tab(tables, partial_pressure_sensitivity)
+        render_measurements_tab(plot_tables, partial_pressure_sensitivity)
     with experiment_tab:
         render_experiment_tab(tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2)
 
