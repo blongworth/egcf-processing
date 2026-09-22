@@ -39,6 +39,7 @@ src/egcf_processing/
   lines.py       # parse_line(payload) -> dict|None -- the core per-line grammar
   discovery.py   # find gems_*.txt + surface_*_lander.log files, merge by rotation ts, skip 0-byte
   reader.py      # read files in order (dispatch on filename), concatenate parsed records
+  events.py      # surface_*_events.log grammar: the SYSTEM battery voltage/current/temp line
   combine.py     # Layer A: build + write status/rga/scalup/valve tables
   rga_scans.py   # Layer B window boundaries: RGA scan-cycle detection
   cycles.py      # Layer C window boundaries: chamber-cycle + experiment numbering
@@ -52,7 +53,8 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
 ```
 
 1. **Layer A (raw combined)** — every raw file (gems + surface) parsed and concatenated by tag into
-   `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`).
+   `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`), plus
+   `system_health.parquet` (`SH`, from `surface_*_events.log` via `events.py`).
    No aggregation. Written first; every later stage reads from these, not from raw files again.
 2. **Layer B (`egcf_rga_scans`)** — one row per RGA mass-scan cycle, boundaries detected from the
    data itself (a "masses seen in this scan" set that resets on a repeat).

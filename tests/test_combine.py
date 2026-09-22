@@ -2,7 +2,14 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from egcf_processing.combine import STATUS_SCHEMA, build_tables, duration_cols_to_seconds, write_df, write_tables
+from egcf_processing.combine import (
+    STATUS_SCHEMA,
+    SYSTEM_HEALTH_SCHEMA,
+    build_tables,
+    duration_cols_to_seconds,
+    write_df,
+    write_tables,
+)
 from egcf_processing.lines import parse_line
 
 LINES = [
@@ -24,6 +31,22 @@ def test_build_tables_row_counts_and_schema():
     assert tables["scalup"].height == 1
     assert tables["status"].height == 0
     assert list(tables["status"].schema.keys()) == list(STATUS_SCHEMA.keys())
+    assert tables["system_health"].height == 0
+    assert dict(tables["system_health"].schema) == SYSTEM_HEALTH_SCHEMA
+
+
+def test_build_tables_system_health_from_sh_records():
+    sh = {
+        "tag": "SH",
+        "ts": datetime(2026, 9, 16, 15, 11, 3),
+        "voltage_v": 27.02,
+        "current_a": 0.033,
+        "teensy_temp_c": 42.5,
+    }
+    tables = build_tables(_records() + [sh])
+    assert tables["system_health"].height == 1
+    assert dict(tables["system_health"].schema) == SYSTEM_HEALTH_SCHEMA
+    assert tables["system_health"]["voltage_v"][0] == 27.02
 
 
 def test_build_tables_ignores_unrecognized_records():
@@ -36,7 +59,7 @@ def test_build_tables_ignores_unrecognized_records():
 def test_write_tables_creates_parquet_files(tmp_path):
     tables = build_tables(_records())
     written = write_tables(tables, tmp_path)
-    assert set(written) == {"rga", "valve", "scalup", "status"}
+    assert set(written) == {"rga", "valve", "scalup", "status", "system_health"}
     for name, path in written.items():
         assert path.exists()
         assert path.suffix == ".parquet"

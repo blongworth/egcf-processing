@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from egcf_processing.combine import STATUS_SCHEMA
 from egcf_processing.dashboard import (
     attach_experiment_context,
     chamber_color_map,
@@ -801,3 +802,80 @@ def test_measurements_tab_rga_data_source_control(tmp_path):
 
     data_source_radio.set_value("Chamber cycle averages").run(timeout=60)
     assert not at.exception
+
+
+def _write_status(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, 5), datetime(2026, 1, 1, 0, 0, 15)],
+            "turbo_error": [0.0, 0.0],
+            "turbo_speed_hz": [1200.0, 1210.0],
+            "turbo_power_w": [50.0, 51.0],
+            "turbo_voltage": [24.0, 24.0],
+            "turbo_etemp_c": [30.0, 30.5],
+            "turbo_btemp_c": [28.0, 28.5],
+            "turbo_mtemp_c": [29.0, 29.5],
+            "rga_filament": [1.0, 1.0],
+            "raw_total_pressure_current": [2000.0, 2100.0],
+            "pump_rpm": [8760.0, 8760.0],
+            "payload_raw": [None, None],
+        }
+    ).write_parquet(tmp_path / "status.parquet")
+
+
+def _write_system_health(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, 3), datetime(2026, 1, 1, 0, 0, 13)],
+            "voltage_v": [27.02, 22.81],
+            "current_a": [0.033, 0.040],
+            "teensy_temp_c": [42.5, 59.8],
+        }
+    ).write_parquet(tmp_path / "system_health.parquet")
+
+
+def _status_tab_spec(tmp_path):
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+    return at, at.tabs[0]
+
+
+def test_status_tab_renders_system_health_when_status_is_empty(tmp_path):
+    pl.DataFrame(schema=STATUS_SCHEMA).write_parquet(tmp_path / "status.parquet")
+    _write_system_health(tmp_path)
+
+    _at, tab = _status_tab_spec(tmp_path)
+    charts = tab.get("plotly_chart")
+    assert len(charts) == 1
+    assert not tab.get("info")
+    spec = json.loads(charts[0].proto.spec)
+    titles = [a["text"] for a in spec["layout"]["annotations"]]
+    assert titles == ["Supply voltage (V)", "Supply current (A)", "Teensy temperature (degC)"]
+
+
+def test_status_tab_renders_all_seven_panels_when_both_tables_populated(tmp_path):
+    _write_status(tmp_path)
+    _write_system_health(tmp_path)
+
+    _at, tab = _status_tab_spec(tmp_path)
+    charts = tab.get("plotly_chart")
+    assert len(charts) == 1
+    spec = json.loads(charts[0].proto.spec)
+    titles = [a["text"] for a in spec["layout"]["annotations"]]
+    assert titles == [
+        "Turbo speed (Hz)",
+        "Turbo power (W)",
+        "Turbo temperatures (degC)",
+        "Total pressure (Torr)",
+        "Supply voltage (V)",
+        "Supply current (A)",
+        "Teensy temperature (degC)",
+    ]
+
+
+def test_status_tab_empty_state_when_both_tables_missing(tmp_path):
+    _at, tab = _status_tab_spec(tmp_path)
+    assert not tab.get("plotly_chart")
+    assert "No status data" in tab.get("info")[0].value

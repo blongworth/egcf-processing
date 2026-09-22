@@ -27,7 +27,7 @@ from egcf_processing.cycles import chamber_cycle_windows
 from egcf_processing.flux import compute_fluxes, linear_fit
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
 
-TABLE_NAMES = ["status", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]
+TABLE_NAMES = ["status", "system_health", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]
 
 _MASS_COLOR_PALETTE = px.colors.qualitative.Plotly
 
@@ -359,53 +359,85 @@ def _render_linked_timeseries(
     st.plotly_chart(fig, width="stretch")
 
 
+_SYSTEM_HEALTH_PANELS = [
+    ("voltage_v", "Supply voltage (V)"),
+    ("current_a", "Supply current (A)"),
+    ("teensy_temp_c", "Teensy temperature (degC)"),
+]
+
+
+def total_pressure_torr(status: pl.DataFrame, total_pressure_sensitivity: float) -> pl.DataFrame:
+    """Convert the raw total-pressure counts in a status table to Amps, then Torr."""
+    return status.select(
+        "ts",
+        (pl.col("raw_total_pressure_current") * RAW_CURRENT_AMPS_PER_COUNT).alias("total_pressure_amps"),
+    ).with_columns((pl.col("total_pressure_amps") / total_pressure_sensitivity).alias("total_pressure_torr"))
+
+
 def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sensitivity: float) -> None:
     status = tables["status"]
-    if status is None or status.is_empty():
+    system_health = tables["system_health"]
+    have_status = status is not None and not status.is_empty()
+    have_system_health = system_health is not None and not system_health.is_empty()
+    if not have_status and not have_system_health:
         _empty_state("status")
         return
 
-    sections: list[tuple[str, list[go.Scatter], bool, bool]] = [
-        (
-            "Turbo speed (Hz)",
-            [go.Scatter(x=status["ts"], y=status["turbo_speed_hz"], mode="lines", name="turbo_speed_hz")],
-            False,
-            False,
-        ),
-        (
-            "Turbo power (W)",
-            [go.Scatter(x=status["ts"], y=status["turbo_power_w"], mode="lines", name="turbo_power_w")],
-            False,
-            False,
-        ),
-    ]
-
-    temp_cols = ["turbo_etemp_c", "turbo_btemp_c", "turbo_mtemp_c"]
-    temp_long = status.select(["ts", *temp_cols]).unpivot(
-        index="ts", on=temp_cols, variable_name="sensor", value_name="temp_c"
-    )
-    temp_traces = [
-        go.Scatter(x=g["ts"], y=g["temp_c"], mode="lines", name=sensor)
-        for sensor in temp_cols
-        for g in [temp_long.filter(pl.col("sensor") == sensor)]
-    ]
-    sections.append(("Turbo temperatures (degC)", temp_traces, False, False))
-
-    if status["raw_total_pressure_current"].drop_nulls().is_empty():
-        st.info("No total pressure data available in this dataset.")
-    else:
-        pressure = status.select(
-            "ts",
-            (pl.col("raw_total_pressure_current") * RAW_CURRENT_AMPS_PER_COUNT).alias("total_pressure_amps"),
-        ).with_columns((pl.col("total_pressure_amps") / total_pressure_sensitivity).alias("total_pressure_torr"))
-        sections.append(
+    sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
+    if have_status:
+        sections += [
             (
-                "Total pressure (Torr)",
-                [go.Scatter(x=pressure["ts"], y=pressure["total_pressure_torr"], mode="lines", name="total_pressure_torr")],
-                True,
+                "Turbo speed (Hz)",
+                [go.Scatter(x=status["ts"], y=status["turbo_speed_hz"], mode="lines", name="turbo_speed_hz")],
+                False,
+                False,
+            ),
+            (
+                "Turbo power (W)",
+                [go.Scatter(x=status["ts"], y=status["turbo_power_w"], mode="lines", name="turbo_power_w")],
+                False,
+                False,
+            ),
+        ]
+
+        temp_cols = ["turbo_etemp_c", "turbo_btemp_c", "turbo_mtemp_c"]
+        temp_long = status.select(["ts", *temp_cols]).unpivot(
+            index="ts", on=temp_cols, variable_name="sensor", value_name="temp_c"
+        )
+        temp_traces = [
+            go.Scatter(x=g["ts"], y=g["temp_c"], mode="lines", name=sensor)
+            for sensor in temp_cols
+            for g in [temp_long.filter(pl.col("sensor") == sensor)]
+        ]
+        sections.append(("Turbo temperatures (degC)", temp_traces, False, False))
+
+        if status["raw_total_pressure_current"].drop_nulls().is_empty():
+            st.info("No total pressure data available in this dataset.")
+        else:
+            pressure = total_pressure_torr(status, total_pressure_sensitivity)
+            sections.append(
+                (
+                    "Total pressure (Torr)",
+                    [
+                        go.Scatter(
+                            x=pressure["ts"], y=pressure["total_pressure_torr"], mode="lines", name="total_pressure_torr"
+                        )
+                    ],
+                    True,
+                    False,
+                )
+            )
+
+    if have_system_health:
+        sections += [
+            (
+                label,
+                [go.Scatter(x=system_health["ts"], y=system_health[col], mode="lines", name=col)],
+                False,
                 False,
             )
-        )
+            for col, label in _SYSTEM_HEALTH_PANELS
+        ]
 
     _render_linked_timeseries(sections, title="Status")
 

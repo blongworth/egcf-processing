@@ -80,11 +80,24 @@ timeseries is keyed on the lander-embedded timestamp `parse_line` already extrac
 so gems and surface records are directly comparable/mergeable once parsed.
 
 The surface log ships as a *pair* of files per rotation, `surface_<ts>_lander.log` and
-`surface_<ts>_events.log`; only `_lander.log` is in scope. `_events.log` has a 3-field format
-(`iso8601 direction payload`, e.g. `RX_CONSOLE VSTAT` / `TX_LANDER VSTAT`) recording console/lander
-comms traffic, not measurements — it never contains an R:/V:/P:/!: payload in the real test corpus, so
-`find_surface_files` excludes it by not matching the `_lander.log` glob (same exclusion-by-glob pattern
-`find_gems_files` uses for legacy formats), rather than by explicit filtering.
+`surface_<ts>_events.log`, and the two are read by *separate* discovery/reader paths. `_events.log`
+has a 3-field format (`iso8601 direction payload`, e.g. `RX_CONSOLE VSTAT` / `TX_LANDER VSTAT`)
+recording console/lander comms traffic, and never contains an R:/V:/P:/!: payload — so
+`find_surface_files`/`find_all_files`/`reader` exclude it by not matching the `_lander.log` glob
+(same exclusion-by-glob pattern `find_gems_files` uses for legacy formats), rather than by explicit
+filtering.
+
+It is not, however, wholly out of scope: `discovery.find_surface_events_files()` +
+`events.read_all_events()` read it for exactly one line shape, the 10-second
+`SYSTEM battery voltage=27.02V current=0.033A temp=42.5C` housekeeping line, emitted as an `SH`
+record into `system_health.parquet` (Layer A). `events.py` is deliberately parallel to
+`lines.py`/`reader.py` rather than folded into them, since both the envelope and the payload
+grammar differ. **These records use the surface *receipt* timestamp as `ts`** — a deliberate
+divergence from the rule stated just above (lander logs discard the receipt ts in favor of the
+lander-embedded one), because the envelope ts is the only timestamp these lines have. Every other
+events-log line (headers, `RX_CONSOLE`/`TX_LANDER` commands, `SYSTEM startup complete`, the
+`battery voltage below threshold; sending OFF to lander` prose, garbled serial) parses to `None`
+and is counted as a DEBUG-level skip, not warned about per line — non-data is the norm here.
 
 **`!:` (status) occurs in the real surface corpus, unlike the gems corpus.** The "gems `!:` never
 occurs" gotcha below is specific to the SD-card recovery data; `data/raw/surface/egcf_surface_test_data_2026-08-25/`
@@ -94,8 +107,19 @@ has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total
 ## Pipeline model (four layers)
 
 1. **Layer A (raw combined)** — every raw file (gems + surface, see above) parsed and concatenated by
-   tag into `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`).
-   No aggregation. Written first; every later stage reads from these, not from raw files again.
+   tag into `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`),
+   plus `system_health.parquet` (`SH`, from the surface events logs — `voltage_v`, `current_a`,
+   `teensy_temp_c`). No aggregation. Written first; every later stage reads from these, not from raw
+   files again. `system_health` is intentionally *not* aggregated onto cycle windows; if per-cycle mean
+   voltage is wanted it rides `aggregate.aggregate_onto_windows()` as one more source table.
+
+   **`system_health.teensy_temp_c` is not a battery temperature** despite riding the firmware's
+   `battery` line prefix: the observed 42–60 °C at ~0.03 A is far too hot for a pack at that current,
+   and is the Teensy die temperature. Observed ranges over the 2026-09-18 surface corpus (~44k rows,
+   one row per 10 s): voltage 22.8–27.0 V (the supply/battery rail), current 0.032–0.040 A, temp
+   42–60 °C. The corpus also contains `SYSTEM battery voltage below threshold; sending OFF to lander`
+   and `low voltage shutdown confirmed by lander` events, so the voltage trace is the diagnostic for
+   explaining deployment data gaps.
 2. **Layer B (`egcf_rga_scans`)** — one row per RGA mass-scan cycle (~10s pass through the
    configured mass list). Scan boundaries are detected from the data itself (a
    "masses seen in this scan" set that resets on a repeat), not from a fixed mass count/order.

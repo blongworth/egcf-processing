@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from egcf_processing import aggregate, combine, cycles, discovery, flux, reader, rga_scans
+from egcf_processing import aggregate, combine, cycles, discovery, events, flux, reader, rga_scans
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,10 @@ def run(
 
     records = reader.read_all(files)
     logger.info("parsed %d record(s)", len(records))
+
+    event_files = discovery.find_surface_events_files(raw_dir)
+    logger.info("found %d surface_*_events.log file(s) under %s", len(event_files), raw_dir)
+    records.extend(events.read_all_events(event_files))
 
     tables = combine.build_tables(records)
     written = combine.write_tables(tables, out_dir, output_format)
@@ -82,6 +86,7 @@ def run(
     return {
         "n_files": len(files),
         "n_records": len(records),
+        "n_system_health_rows": tables["system_health"].height,
         "cycle_stats": cycle_stats,
         "layer_b_rows": layer_b.height,
         "layer_c_rows": layer_c.height,

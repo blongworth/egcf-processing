@@ -1,4 +1,9 @@
-from egcf_processing.discovery import find_all_files, find_gems_files, find_surface_files
+from egcf_processing.discovery import (
+    find_all_files,
+    find_gems_files,
+    find_surface_events_files,
+    find_surface_files,
+)
 
 
 def test_find_surface_files_sorts_by_rotation_ts_and_skips_zero_byte(tmp_path):
@@ -30,3 +35,17 @@ def test_find_all_files_merges_gems_and_surface_in_rotation_order(tmp_path):
 
     assert find_all_files(tmp_path) == [gems, surface]
     assert find_gems_files(tmp_path) == [gems]
+
+
+def test_find_surface_events_files_sorts_by_rotation_ts_and_skips_zero_byte(tmp_path):
+    later = tmp_path / "surface_2026-08-25-18-32_events.log"
+    earlier = tmp_path / "surface_2026-08-25-14-53_events.log"
+    empty = tmp_path / "surface_2026-08-25-20-00_events.log"
+    lander = tmp_path / "surface_2026-08-25-18-32_lander.log"
+    later.write_text("2026-08-25T18:33:00Z SYSTEM battery voltage=27.02V current=0.033A temp=42.5C\n")
+    earlier.write_text("2026-08-25T14:54:00Z SYSTEM battery voltage=26.02V current=0.033A temp=42.5C\n")
+    empty.write_text("")
+    lander.write_text("V:2026-08-25T18:32:00Z,C1,Re\n")
+
+    assert find_surface_events_files(tmp_path) == [earlier, later]
+    assert find_all_files(tmp_path) == [lander]

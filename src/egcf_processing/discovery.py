@@ -10,6 +10,7 @@ from pathlib import Path
 
 _GEMS_FILENAME_RE = re.compile(r"^gems_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})\.txt$")
 _SURFACE_FILENAME_RE = re.compile(r"^surface_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})_lander\.log$")
+_SURFACE_EVENTS_FILENAME_RE = re.compile(r"^surface_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})_events\.log$")
 
 
 def parse_rotation_ts(path: Path) -> datetime | None:
@@ -50,16 +51,45 @@ def find_gems_files(raw_dir: Path) -> list[Path]:
 def find_surface_files(raw_dir: Path) -> list[Path]:
     """Find all surface_*_lander.log files under raw_dir, sorted by rotation timestamp.
 
-    Only the *_lander.log half of the surface log pair is in scope. The paired
-    *_events.log file (same rotation naming) records communication traffic
-    (RX_CONSOLE/TX_LANDER/SYSTEM direction + payload) rather than chamber/RGA/
-    scalup measurements, so it never contains a parseable R:/V:/P:/!: payload
-    and is excluded by not matching this glob, the same way legacy gems
-    formats are excluded from find_gems_files.
+    Only the *_lander.log half of the surface log pair belongs in *this* list,
+    which feeds reader.read_all -> parse_line. The paired *_events.log file
+    (same rotation naming) records communication traffic
+    (RX_CONSOLE/TX_LANDER/SYSTEM direction + payload) and never contains a
+    parseable R:/V:/P:/!: payload, so it is excluded by not matching this glob,
+    the same way legacy gems formats are excluded from find_gems_files. It does
+    carry its own housekeeping telemetry, read via the separate
+    find_surface_events_files -> events.read_all_events path.
     """
     candidates = []
     for path in raw_dir.rglob("surface_*_lander.log"):
         rotation_ts = parse_surface_rotation_ts(path)
+        if rotation_ts is None:
+            continue
+        if path.stat().st_size == 0:
+            continue
+        candidates.append((rotation_ts, path))
+    candidates.sort(key=lambda pair: pair[0])
+    return [path for _, path in candidates]
+
+
+def parse_surface_events_rotation_ts(path: Path) -> datetime | None:
+    """Parse the rotation timestamp embedded in a surface_*_events.log filename, if present."""
+    match = _SURFACE_EVENTS_FILENAME_RE.match(path.name)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y-%m-%d-%H-%M")
+
+
+def find_surface_events_files(raw_dir: Path) -> list[Path]:
+    """Find all surface_*_events.log files under raw_dir, sorted by rotation timestamp.
+
+    These are deliberately *not* part of find_all_files: they use a different
+    grammar (see events.py) and are read by events.read_all_events instead of
+    reader.read_all.
+    """
+    candidates = []
+    for path in raw_dir.rglob("surface_*_events.log"):
+        rotation_ts = parse_surface_events_rotation_ts(path)
         if rotation_ts is None:
             continue
         if path.stat().st_size == 0:

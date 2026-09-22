@@ -35,11 +35,19 @@ STATUS_SCHEMA = {
     "payload_raw": pl.Utf8,
 }
 
+SYSTEM_HEALTH_SCHEMA = {
+    "ts": pl.Datetime,
+    "voltage_v": pl.Float64,
+    "current_a": pl.Float64,
+    "teensy_temp_c": pl.Float64,
+}
+
 _TAG_SCHEMAS = {
     "R": ("rga", RGA_SCHEMA),
     "V": ("valve", VALVE_SCHEMA),
     "P": ("scalup", SCALUP_SCHEMA),
     "!": ("status", STATUS_SCHEMA),
+    "SH": ("system_health", SYSTEM_HEALTH_SCHEMA),
 }
 
 

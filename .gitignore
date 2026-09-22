@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # Data (raw and processed) -- not tracked in git
-/data/
+/data/*
 
 # OS cruft
 .DS_Store
