@@ -340,8 +340,8 @@ Instrument gotchas to handle explicitly, in rough order of how much damage each 
 `src/egcf_processing/dashboard.py`. It's a **read-only viewer** over an
 already-processed `data/processed`-style directory (parquet, falling back to
 csv per table if no parquet exists) — it has no control to trigger a
-pipeline run itself, by design. Three tabs: Status (turbo speed/power/temp,
-plus total pressure only if `status.parquet` has any non-null
+pipeline run itself, by design. Three tabs: Status (turbo speed/power/temp, water
+pump RPM, plus total pressure only if `status.parquet` has any non-null
 `raw_total_pressure_current` — currently always empty against real data, so
 this is normally a "no data" message, not a bug), Measurements (RGA mass
 data plus scalup sonde data, all with a raw/Amps/Torr unit toggle reusing

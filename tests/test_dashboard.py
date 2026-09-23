@@ -862,7 +862,7 @@ def test_status_tab_renders_system_health_when_status_is_empty(tmp_path):
     assert titles == ["Supply voltage (V)", "Supply current (A)", "Teensy temperature (degC)"]
 
 
-def test_status_tab_renders_all_seven_panels_when_both_tables_populated(tmp_path):
+def test_status_tab_renders_all_eight_panels_when_both_tables_populated(tmp_path):
     _write_status(tmp_path)
     _write_system_health(tmp_path)
 
@@ -875,6 +875,7 @@ def test_status_tab_renders_all_seven_panels_when_both_tables_populated(tmp_path
         "Turbo speed (Hz)",
         "Turbo power (W)",
         "Turbo temperatures (degC)",
+        "Water pump (RPM)",
         "Total pressure (Torr)",
         "Supply voltage (V)",
         "Supply current (A)",

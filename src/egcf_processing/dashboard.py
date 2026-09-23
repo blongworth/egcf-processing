@@ -622,6 +622,14 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
             for g in [temp_long.filter(pl.col("sensor") == sensor)]
         ]
         sections.append(("Turbo temperatures (degC)", temp_traces, False, False))
+        sections.append(
+            (
+                "Water pump (RPM)",
+                [go.Scatter(x=status["ts"], y=status["pump_rpm"], mode="lines", name="pump_rpm")],
+                False,
+                False,
+            )
+        )
 
         if status["raw_total_pressure_current"].drop_nulls().is_empty():
             st.info("No total pressure data available in this dataset.")
