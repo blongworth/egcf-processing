@@ -21,9 +21,10 @@ Always check actual sample files before assuming the README's format holds.
 ```
 src/egcf_processing/
   lines.py        # parse_line(payload) -> dict|None -- the core per-line grammar
-  discovery.py     # find gems_*.txt + surface_*_lander.log files, parse rotation ts, skip 0-byte
+  discovery.py     # find gems_*.txt + surface_*_lander.log files, parse rotation ts, skip 0-byte; find Odyssey PAR CSVs
   reader.py        # read files in order (dispatch by filename), concatenate parsed records
   combine.py       # Layer A: build + write status/rga/scalup/valve tables
+  par.py           # Layer A par table: Odyssey PAR logger reader + calibration (par_calibrations.csv)
   rga_scans.py     # Layer B window boundaries: RGA scan-cycle detection
   cycles.py        # Layer C window boundaries: chamber-cycle + experiment numbering
   aggregate.py     # shared windowed aggregation used by both Layer B and C
@@ -110,7 +111,8 @@ has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total
    tag into `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`),
    plus `system_health.parquet` (`SH`, from the surface events logs — `voltage_v`, `current_a`,
    `teensy_temp_c`). No aggregation. Written first; every later stage reads from these, not from raw
-   files again. `system_health` is intentionally *not* aggregated onto cycle windows; if per-cycle mean
+   files again. `par.parquet` (Odyssey PAR logger, see "PAR" below) is also Layer A, and unlike
+   `system_health` it *is* aggregated onto Layers B/C. `system_health` is intentionally *not* aggregated onto cycle windows; if per-cycle mean
    voltage is wanted it rides `aggregate.aggregate_onto_windows()` as one more source table.
 
    **`system_health.teensy_temp_c` is not a battery temperature** despite riding the firmware's
@@ -232,50 +234,94 @@ by dividing `mass_44_torr` by a guessed solubility — the nominal sensitivity m
 Torr values approximate (see the RGA conversion note above), so the result would look
 quantitative while being off by whatever the real SP/ST calibration factor is.
 
-### Planned: PAR from a co-deployed Odyssey logger
+### PAR from a co-deployed Odyssey logger (`par.py`)
 
-An Odyssey submersible PAR logger is being co-deployed with the lander. **No parser is written
-yet, deliberately** — no real Odyssey export exists in `data/raw/` to check the format against,
-and this repo's standing rule is to read actual sample files rather than trust a spec (see the
-firmware-README warning at the top). Don't write one from an assumed format; wait for a file.
+An Odyssey integrating light logger (serial 50472) is deployed with the lander. It's a
+**separately clocked, separately recovered logger**, not a payload in the lander's line grammar.
+So `par.py` is its own reader, parallel to `events.py`. It feeds a Layer A `par` table
+(`par.parquet`: `ts`, `scan_no`, `par_raw`, `par_umol_m2_s`, `serial_number`, `sensor_number`,
+`cal_date`, `interval_s`). That table then rides the *existing* `aggregate.aggregate_onto_windows()`
+through the `par=` keyword, adding the mean `par_umol_m2_s` and `par_raw` per window to Layers B
+and C. There's no parallel aggregation path. With no PAR file, `par.parquet` is still written
+empty with the typed schema, and the B/C PAR columns are null.
 
 Why it matters: without light, every O2 flux pools photosynthesis and respiration into a mean
-that means little for an eelgrass bed. With it, dark incubations give respiration (R), light ones
-give net community production (NCP = GPP − R), and GPP = NCP + |R|. It also cross-checks the
-other variables — pH rises in light and falls in dark, so H⁺ flux should anticorrelate with PAR.
+that means little for an eelgrass bed. Dark incubations give respiration (R), light ones give net
+community production (NCP), and GPP = NCP + |R|. pH rises in light and falls in dark, so H⁺ flux
+should anticorrelate with PAR.
 
-Agreed scope for Layer D once the data lands:
+**File identification is by content, not name.** `discovery.find_par_files()` `rglob`s
+`--par-dir` (default: `raw_dir`) for `*.csv`/`*.CSV` and keeps files where `par.is_odyssey_export()` is true: the first line (BOM
+stripped) starts with `Site Name` and the header has a `Logger Serial Number` line. This keeps
+legacy CSVs like `gems_pump_*.csv` out. 0-byte files are skipped. The real export
+(`data/raw/PAR/ESL-EGCF_011_001.CSV`) has a UTF-8 BOM and CRLF line endings, `key ,value` header
+lines, two column-header rows (`Scan No ,...` / `...,RAW VALUE ,CALIBRATED VALUE,`), and data rows
+like `1,18/09/2026 , 16:11:14,2223,2223`. The fields carry stray spaces. The date is **dd/mm/yyyy**.
+In this file RAW == CALIBRATED, so it's uncalibrated.
 
-- **PAR as a covariate** — mean and integrated PAR per chamber cycle on every flux row.
-- **Light/dark O2 partition** — classify each incubation by mean PAR; report R, NCP, GPP.
-- **P–I curve fit** — NCP vs PAR across all incubations (Jassby & Platt tanh), yielding Pmax, α,
-  saturation irradiance Ik, and dark R as the intercept. This is the real payoff of an
-  unattended lander doing many incubations at many irradiances.
-- Daily integrated metabolism was considered and **not** included in the initial scope.
+**Calibration lives in `src/egcf_processing/par_calibrations.csv`, not in code.** It ships in the
+package, and `--par-calibrations` points at a different file. Columns: `sensor_number`,
+`serial_number`, `cal_date`, `interval_s`, `slope`, `intercept`, `notes`. The formula is ported
+from CRISPEE's `loadPAR.m`: `par_umol_m2_s = max(0, slope·par_raw + intercept)`. The current
+coefficients are CRISPEE's (a test deployment against a calibrated PME PAR logger).
+`select_calibration()` looks only at rows for the file's serial and picks the latest `cal_date` on
+or before the file's first timestamp. A blank `cal_date` sorts as the oldest, so a dated
+calibration added later wins. If no row matches, you get a WARNING and `par_umol_m2_s` stays null.
+`par_raw` is always kept.
 
-Structurally the Odyssey is unlike anything in the pipeline today: a **separately-clocked,
-separately-recovered logger**, not a payload in the lander's line grammar. Expected shape is a
-new discovery/reader path feeding a Layer A `par` table, which then rides the *existing*
-`aggregate.aggregate_onto_windows()` as one more source table (the case the "schema present even
-when empty" note below already anticipates) — not a parallel aggregation path.
+A consequence of the loadPAR.m formula: with a positive intercept, night-time raw 0 reads as
+`intercept` (6.45 µmol m⁻² s⁻¹ for sensor 1), not 0. The clamp only removes negatives. This is
+faithful to the port, not a bug, but it biases dark-period means slightly high.
 
-Instrument gotchas to handle explicitly, in rough order of how much damage each does:
+**The interval check.** The Odyssey is an *integrating* sensor, so raw counts depend on the
+logging interval. `interval_s` in the calibration CSV is the interval the calibration was fit at.
+The file's interval is the median `ts` spacing (300 s for the current file), recorded in
+`par.interval_s`. If the calibration's `interval_s` is set and differs, you get a WARNING and
+`par_umol_m2_s` stays null. Counts are **never rescaled silently**. If it's blank (as all rows are
+now, since CRISPEE's interval isn't known), the calibration is applied with a WARNING that the
+interval wasn't checked.
 
-- **Clock offset is the top risk.** The Odyssey's RTC is set by PC at launch and drifts over a
-  multi-week deployment, and its software commonly writes **local time** while the lander runs
-  UTC. A silent 15-minute misalignment puts dawn/dusk incubations at the wrong irradiance and
-  quietly bends the whole P–I curve. Needed: launch time, timezone, and a recovery clock-check
-  if one was taken. Treat the offset as an explicit input, never inferred.
-- **Calibration state is unknown** — Odysseys log raw counts with per-unit calibration factors
-  and real unit-to-unit variability. Support both: read raw counts and accept a calibration
-  factor that defaults to pass-through, so an already-calibrated file works unchanged.
-- **Biofouling is a drift, not noise.** A fouling diffuser reads progressively low and
-  systematically bends P–I parameters across the deployment. Testable by checking whether
-  clear-sky noon maxima decline monotonically over the record.
-- **Chamber shading** — the logger sees ambient PAR; the enclosed sediment sees that minus what
-  the chamber walls and lid block. Correcting it needs the chamber's transmittance.
-- **Unit collision**: PAR is µmol photons m⁻² **s**⁻¹ while fluxes are µmol m⁻² **h**⁻¹. Name
-  the columns so the two can't be confused.
+**Clock.** The logger's RTC is independent of the lander's. `--par-time-offset-h` (default 0,
+loadPAR.m's `timeShift`) is added to every logger timestamp. `--par-start`/`--par-end` (ISO
+datetimes, applied after the offset, half-open) trim to the deployment (loadPAR.m's
+`startDate`/`endDate`). Nothing is trimmed by default. **Finding for the current file:** the
+logger clock is probably already UTC. Hourly-mean raw counts peak at 16:00, first light is
+~10:20–10:30 and last light ~22:50. All of these match Woods Hole solar noon, sunrise, and sunset
+in UTC for mid-September. On a local-time (EDT) clock they would fall 4 h earlier. The code
+**never infers** the offset. Keep it an explicit input and recheck it for every deployment. A
+silent offset puts dawn/dusk incubations at the wrong irradiance and bends any P–I curve.
+
+**Unit naming**: PAR is µmol photons m⁻² **s**⁻¹ (`par_umol_m2_s`) while fluxes are µmol m⁻²
+**h**⁻¹. Keep the `_s` suffix on any derived PAR column so the two can't be confused.
+
+The dashboard's Measurements tab plots `par_umol_m2_s` as the last panel on the shared, linked
+time axis, with the chamber shading, so light lines up against O2 and pH. If every calibrated
+value is null, it plots `par_raw` as "PAR (raw counts, uncalibrated)" with an `st.info`.
+
+Not handled yet (see suggestions below): **biofouling** (a fouling diffuser reads progressively
+low; test by checking whether clear-sky noon maxima decline over the record) and **chamber
+shading** (the logger sees ambient PAR; the enclosed sediment sees that times the chamber's
+transmittance, which hasn't been measured).
+
+#### Suggested next steps (not implemented)
+
+1. **Per-experiment PAR on Layer D** (`flux.py`): join mean and integrated PAR over each
+   experiment's full incubation span onto every flux row (`par_mean_umol_m2_s`,
+   `par_integrated_mol_m2`). Use the whole experiment, not individual cycles. Chambers stay sealed
+   for the whole experiment, so each O2 flux integrates the light history of that entire span.
+2. **`metabolism.py` (Layer E, `egcf_metabolism`)**: classify each O2 flux as light or dark from a
+   PAR threshold. Dark gives R, light gives NCP, and GPP = NCP + |R|. Fit a Jassby–Platt P–I curve,
+   `NCP = Pmax·tanh(α·I/Pmax) − R`, per chamber across experiments, reporting Pmax, α,
+   Ik = Pmax/α, and R. `scipy.optimize.curve_fit` would be a new dependency to approve; a
+   pure-numpy grid fit is the alternative. Daily integrated metabolism was considered and left out
+   of the initial scope.
+3. **Dashboard "Metabolism" section or tab**: O2 flux vs mean PAR scatter, colored by chamber, with
+   the fitted curve overlaid. Add H⁺ flux vs PAR as a cross-check.
+4. **QC**: daily clear-sky noon-max PAR trend (biofouling), daily light integral
+   (mol photons m⁻² d⁻¹) on the Measurements tab, and a chamber-transmittance factor once it's
+   measured.
+5. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
+   the serials for sensors 2 and 3.
 
 ## Data format gotchas (confirmed against real files, not just the README)
 

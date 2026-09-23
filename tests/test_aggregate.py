@@ -176,3 +176,27 @@ def test_same_raw_data_different_window_grains():
 
     assert fine["temp_degC"].to_list() == [10.0, 20.0, 30.0]
     assert coarse["temp_degC"].to_list() == [20.0]  # mean of all three
+
+
+def test_par_mean_per_window():
+    windows = _windows([(0, 100, "C1", 1, 0), (100, 200, "C2", 1, 100)])
+    par = pl.DataFrame(
+        {
+            "ts": [_ts(10), _ts(50), _ts(150), _ts(250)],
+            "par_raw": [100.0, 200.0, 400.0, 999.0],
+            "par_umol_m2_s": [50.0, 100.0, 200.0, 999.0],
+        }
+    )
+    result = aggregate_onto_windows(
+        windows, _empty(RGA_SCHEMA), _empty(SCALUP_SCHEMA), _empty(STATUS_SCHEMA), par=par
+    )
+    assert result["par_umol_m2_s"].to_list() == [75.0, 200.0]
+    assert result["par_raw"].to_list() == [150.0, 400.0]
+
+
+def test_par_columns_null_when_par_absent():
+    windows = _windows([(0, 100, "C1", 1, 0)])
+    result = aggregate_onto_windows(windows, _empty(RGA_SCHEMA), _empty(SCALUP_SCHEMA), _empty(STATUS_SCHEMA))
+    assert result["par_umol_m2_s"][0] is None
+    assert result["par_raw"][0] is None
+    assert result.columns.index("par_umol_m2_s") == result.columns.index("pH") + 1

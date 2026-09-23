@@ -23,7 +23,8 @@ uv run pytest -q                   # run the full test suite
 uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
 uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
-    [--settle-offset-s 60] [--format parquet|csv]
+    [--settle-offset-s 60] [--format parquet|csv] \
+    [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>]
 uv run streamlit run dashboard.py  # launch the read-only dashboard
 ```
 
@@ -37,9 +38,10 @@ non-obvious, explicit polars schemas, functions over classes.
 ```
 src/egcf_processing/
   lines.py       # parse_line(payload) -> dict|None -- the core per-line grammar
-  discovery.py   # find gems_*.txt + surface_*_lander.log files, merge by rotation ts, skip 0-byte
+  discovery.py   # find gems_*.txt + surface_*_lander.log files, merge by rotation ts, skip 0-byte; find PAR CSVs
   reader.py      # read files in order (dispatch on filename), concatenate parsed records
   events.py      # surface_*_events.log grammar: the SYSTEM battery voltage/current/temp line
+  par.py         # Odyssey PAR logger CSV reader + calibration from par_calibrations.csv
   combine.py     # Layer A: build + write status/rga/scalup/valve tables
   rga_scans.py   # Layer B window boundaries: RGA scan-cycle detection
   cycles.py      # Layer C window boundaries: chamber-cycle + experiment numbering
@@ -54,7 +56,8 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
 
 1. **Layer A (raw combined)** — every raw file (gems + surface) parsed and concatenated by tag into
    `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`), plus
-   `system_health.parquet` (`SH`, from `surface_*_events.log` via `events.py`).
+   `system_health.parquet` (`SH`, from `surface_*_events.log` via `events.py`), and `par.parquet`
+   (Odyssey PAR logger CSVs via `par.py`, identified by header content; also averaged onto B/C).
    No aggregation. Written first; every later stage reads from these, not from raw files again.
 2. **Layer B (`egcf_rga_scans`)** — one row per RGA mass-scan cycle, boundaries detected from the
    data itself (a "masses seen in this scan" set that resets on a repeat).

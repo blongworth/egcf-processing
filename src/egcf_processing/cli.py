@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from egcf_processing.pipeline import (
     DEFAULT_N2_AR_SENSITIVITY_RATIO,
     DEFAULT_OUTPUT_FORMAT,
+    DEFAULT_PAR_CALIBRATIONS_PATH,
+    DEFAULT_PAR_TIME_OFFSET_H,
     DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     DEFAULT_SETTLE_OFFSET_S,
     DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
@@ -64,6 +67,37 @@ def main(argv: list[str] | None = None) -> None:
         "(see flux.n2_ar_sensitivity_from_standard). Leaving this at 1.0 makes N2:Ar flux "
         "non-quantitative in magnitude",
     )
+    parser.add_argument(
+        "--par-dir",
+        type=Path,
+        default=None,
+        help="Directory to search for Odyssey PAR logger exports; defaults to raw_dir",
+    )
+    parser.add_argument(
+        "--par-calibrations",
+        type=Path,
+        default=DEFAULT_PAR_CALIBRATIONS_PATH,
+        help="CSV of Odyssey PAR calibrations (sensor_number, serial_number, cal_date, interval_s, slope, "
+        "intercept); defaults to the bundled par_calibrations.csv",
+    )
+    parser.add_argument(
+        "--par-time-offset-h",
+        type=float,
+        default=DEFAULT_PAR_TIME_OFFSET_H,
+        help="Hours added to every PAR logger timestamp to bring it onto the lander's UTC clock",
+    )
+    parser.add_argument(
+        "--par-start",
+        type=datetime.fromisoformat,
+        default=None,
+        help="Drop PAR rows before this ISO datetime (after the time offset), e.g. the deployment start",
+    )
+    parser.add_argument(
+        "--par-end",
+        type=datetime.fromisoformat,
+        default=None,
+        help="Drop PAR rows at or after this ISO datetime (after the time offset), e.g. recovery",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -78,6 +112,11 @@ def main(argv: list[str] | None = None) -> None:
         partial_pressure_sensitivity_a_per_torr=args.partial_pressure_sensitivity,
         total_pressure_sensitivity_a_per_torr=args.total_pressure_sensitivity,
         n2_ar_sensitivity_ratio=args.n2_ar_sensitivity_ratio,
+        par_dir=args.par_dir,
+        par_calibrations_path=args.par_calibrations,
+        par_time_offset_h=args.par_time_offset_h,
+        par_start=args.par_start,
+        par_end=args.par_end,
     )
 
 

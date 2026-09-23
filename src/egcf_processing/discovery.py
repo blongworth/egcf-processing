@@ -1,5 +1,5 @@
 """Find and order lander SD-card log files (``gems_YYYY-MM-DD-HH-MM.txt``) and surface
-telemetry log files (``surface_YYYY-MM-DD-HH-MM_lander.log``).
+telemetry log files (``surface_YYYY-MM-DD-HH-MM_lander.log``), plus Odyssey PAR logger exports.
 """
 
 from __future__ import annotations
@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
+
+from egcf_processing.par import is_odyssey_export
 
 _GEMS_FILENAME_RE = re.compile(r"^gems_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})\.txt$")
 _SURFACE_FILENAME_RE = re.compile(r"^surface_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})_lander\.log$")
@@ -105,3 +107,13 @@ def find_all_files(raw_dir: Path) -> list[Path]:
     surface = [(parse_surface_rotation_ts(p), p) for p in find_surface_files(raw_dir)]
     combined = sorted(gems + surface, key=lambda pair: pair[0])
     return [path for _, path in combined]
+
+
+def find_par_files(raw_dir: Path) -> list[Path]:
+    """Find Odyssey PAR logger exports (*.csv/*.CSV) under raw_dir, sorted by path.
+
+    Identified by header content (see par.is_odyssey_export), not filename, so
+    legacy CSVs like gems_pump_*.csv are excluded.
+    """
+    paths = {p for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".csv"}
+    return sorted(p for p in paths if p.stat().st_size > 0 and is_odyssey_export(p))

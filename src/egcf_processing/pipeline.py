@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
-from egcf_processing import aggregate, combine, cycles, discovery, events, flux, reader, rga_scans
+from egcf_processing import aggregate, combine, cycles, discovery, events, flux, par, reader, rga_scans
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,8 @@ DEFAULT_OUTPUT_FORMAT = "parquet"
 DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR = aggregate.DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR
 DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = aggregate.DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR
 DEFAULT_N2_AR_SENSITIVITY_RATIO = flux.DEFAULT_N2_AR_SENSITIVITY_RATIO
+DEFAULT_PAR_CALIBRATIONS_PATH = par.DEFAULT_CALIBRATIONS_PATH
+DEFAULT_PAR_TIME_OFFSET_H = 0.0
 
 
 def run(
@@ -26,6 +29,11 @@ def run(
     partial_pressure_sensitivity_a_per_torr: float = DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     total_pressure_sensitivity_a_per_torr: float = DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     n2_ar_sensitivity_ratio: float = DEFAULT_N2_AR_SENSITIVITY_RATIO,
+    par_dir: Path | None = None,
+    par_calibrations_path: Path = DEFAULT_PAR_CALIBRATIONS_PATH,
+    par_time_offset_h: float = DEFAULT_PAR_TIME_OFFSET_H,
+    par_start: datetime | None = None,
+    par_end: datetime | None = None,
 ) -> dict:
     files = discovery.find_all_files(raw_dir)
     logger.info("found %d gems_*.txt/surface_*_lander.log file(s) under %s", len(files), raw_dir)
@@ -41,6 +49,15 @@ def run(
     written = combine.write_tables(tables, out_dir, output_format)
     for name, path in written.items():
         logger.info("wrote %s (%d rows) -> %s", name, tables[name].height, path)
+
+    par_search_dir = par_dir if par_dir is not None else raw_dir
+    par_files = discovery.find_par_files(par_search_dir)
+    logger.info("found %d Odyssey PAR export(s) under %s", len(par_files), par_search_dir)
+    par_table = par.read_all_par(
+        par_files, par.load_calibrations(par_calibrations_path), par_time_offset_h, par_start, par_end
+    )
+    par_path = combine.write_df(par_table, out_dir, "par", output_format)
+    logger.info("wrote par (%d rows) -> %s", par_table.height, par_path)
 
     chamber_windows, cycle_stats = cycles.chamber_cycle_windows(tables["valve"], settle_offset_s)
     logger.info(
@@ -59,6 +76,7 @@ def run(
         tables["status"],
         partial_pressure_sensitivity_a_per_torr,
         total_pressure_sensitivity_a_per_torr,
+        par=par_table,
     )
     layer_c = aggregate.aggregate_onto_windows(
         chamber_windows,
@@ -67,6 +85,7 @@ def run(
         tables["status"],
         partial_pressure_sensitivity_a_per_torr,
         total_pressure_sensitivity_a_per_torr,
+        par=par_table,
     )
 
     layer_d = flux.compute_fluxes(layer_c, chamber_volume_l, chamber_area_m2, n2_ar_sensitivity_ratio)
@@ -87,6 +106,7 @@ def run(
         "n_files": len(files),
         "n_records": len(records),
         "n_system_health_rows": tables["system_health"].height,
+        "n_par_rows": par_table.height,
         "cycle_stats": cycle_stats,
         "layer_b_rows": layer_b.height,
         "layer_c_rows": layer_c.height,

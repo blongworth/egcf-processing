@@ -9,6 +9,7 @@ from __future__ import annotations
 import polars as pl
 
 _SCALUP_COLS = ["temp_degC", "sal_PSU", "pressure_mbar", "oxygen_mgL", "pH"]
+_PAR_COLS = ["par_umol_m2_s", "par_raw"]
 _STATUS_COLS = [
     "turbo_speed_hz",
     "turbo_power_w",
@@ -116,6 +117,18 @@ def _aggregate_status(
     ).drop("_raw_tp_mean")
 
 
+def _aggregate_par(par: pl.DataFrame | None, windows: pl.DataFrame) -> pl.DataFrame:
+    if par is None or par.is_empty():
+        return _empty_float_cols(windows, _PAR_COLS)
+    matched = match_readings_to_windows(par, windows)
+    if matched.is_empty():
+        return _empty_float_cols(windows, _PAR_COLS)
+    return matched.group_by("window_start").agg(
+        pl.col("par_umol_m2_s").mean().alias("par_umol_m2_s"),
+        pl.col("par_raw").mean().alias("par_raw"),
+    )
+
+
 def aggregate_onto_windows(
     windows: pl.DataFrame,
     rga: pl.DataFrame,
@@ -123,16 +136,19 @@ def aggregate_onto_windows(
     status: pl.DataFrame,
     partial_pressure_sensitivity_a_per_torr: float = DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
     total_pressure_sensitivity_a_per_torr: float = DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+    par: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """Average rga/scalup/status readings onto each window and join with window context."""
+    """Average rga/scalup/status/par readings onto each window and join with window context."""
     rga_agg = _aggregate_rga(rga, windows, partial_pressure_sensitivity_a_per_torr)
     scalup_agg = _aggregate_scalup(scalup, windows)
     status_agg = _aggregate_status(status, windows, total_pressure_sensitivity_a_per_torr)
+    par_agg = _aggregate_par(par, windows)
 
     result = (
         windows.join(rga_agg, on="window_start", how="left")
         .join(scalup_agg, on="window_start", how="left")
         .join(status_agg, on="window_start", how="left")
+        .join(par_agg, on="window_start", how="left")
         .rename({"window_start": "timestamp"})
         .drop("window_end")
     )
@@ -146,6 +162,7 @@ def aggregate_onto_windows(
         + mass_cols
         + ["total_pressure_amps", "total_pressure_torr"]
         + _SCALUP_COLS
+        + _PAR_COLS
         + ["turbo_speed_hz", "turbo_power_w", "water_pump_rpm"]
     )
     return result.select(final_cols).sort("timestamp")

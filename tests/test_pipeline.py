@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from egcf_processing.combine import SYSTEM_HEALTH_SCHEMA
+from egcf_processing.par import PAR_SCHEMA
 from egcf_processing.pipeline import run
 
 # Placeholder chamber geometry -- exercises the flux arithmetic only, not real
@@ -199,3 +200,60 @@ def test_end_to_end_pipeline_gems_only_writes_empty_typed_system_health(tmp_path
     system_health = pl.read_parquet(out_dir / "system_health.parquet")
     assert system_health.is_empty()
     assert dict(system_health.schema) == SYSTEM_HEALTH_SCHEMA
+
+
+ODYSSEY_EXPORT = "\r\n".join(
+    [
+        "﻿Site Name ,ESL-EGCF",
+        "Site Number ,11",
+        "Logger ,Integrating Light Sensor",
+        "Logger Serial Number ,50472",
+        "",
+        "",
+        "Scan No ,Date and Time,       Integrating Light,        ,",
+        "        ,        ,RAW VALUE ,CALIBRATED VALUE,",
+        "",
+        "1,01/01/2026 , 00:00:02,100,100",
+        "2,01/01/2026 , 00:00:04,300,300",
+        "3,01/01/2026 , 00:00:12,500,500",
+    ]
+)
+
+
+def test_end_to_end_pipeline_writes_par_and_averages_it_onto_cycles(tmp_path):
+    raw_dir = tmp_path / "raw"
+    (raw_dir / "PAR").mkdir(parents=True)
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(FILE_1)
+    (raw_dir / "PAR" / "ESL-EGCF_011_001.CSV").write_bytes(ODYSSEY_EXPORT.encode("utf-8"))
+
+    out_dir = tmp_path / "processed"
+    stats = run(raw_dir, out_dir, TEST_VOLUME_L, TEST_AREA_M2, settle_offset_s=0)
+
+    assert stats["n_par_rows"] == 3
+    par = pl.read_parquet(out_dir / "par.parquet")
+    assert par["serial_number"].unique().to_list() == ["50472"]
+    assert par["sensor_number"].unique().to_list() == [1]
+    assert par["par_umol_m2_s"].to_list() == pytest.approx([0.4647 * r + 6.4541 for r in (100, 300, 500)])
+
+    # FILE_1 closes only the C1 cycle [00:00:00, 00:00:10); the 00:00:12 scan
+    # falls in the still-open C2 cycle and is not averaged.
+    chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
+    assert chamber_cycles["par_raw"].to_list() == [200.0]
+
+
+def test_end_to_end_pipeline_without_par_writes_empty_typed_par(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(FILE_1)
+
+    out_dir = tmp_path / "processed"
+    stats = run(raw_dir, out_dir, TEST_VOLUME_L, TEST_AREA_M2, settle_offset_s=0)
+
+    assert stats["n_par_rows"] == 0
+    par = pl.read_parquet(out_dir / "par.parquet")
+    assert par.is_empty()
+    assert par.columns == list(PAR_SCHEMA)
+    assert par.schema["par_umol_m2_s"] == pl.Float64
+
+    chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
+    assert chamber_cycles["par_umol_m2_s"].is_null().all()

@@ -109,3 +109,32 @@ def test_main_total_pressure_sensitivity_flag_reaches_pipeline(tmp_path):
     chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
     # raw_total_pressure_current=2000 -> amps = 2000 * 1e-16; torr = amps / sensitivity.
     assert chamber_cycles["total_pressure_torr"][0] == pytest.approx((2000 * 1e-16) / 5e-4)
+
+
+ODYSSEY_EXPORT = "\r\n".join(
+    [
+        "\ufeffSite Name ,ESL-EGCF",
+        "Logger Serial Number ,50472",
+        "",
+        "Scan No ,Date and Time,       Integrating Light,        ,",
+        "        ,        ,RAW VALUE ,CALIBRATED VALUE,",
+        "",
+        "1,01/01/2026 , 00:00:02,100,100",
+        "2,01/01/2026 , 00:00:04,300,300",
+        "3,01/01/2026 , 00:00:12,500,500",
+    ]
+)
+
+
+def test_main_par_dir_flag_searches_outside_raw_dir(tmp_path):
+    raw_dir = _write_raw(tmp_path)
+    par_dir = tmp_path / "PAR"
+    par_dir.mkdir()
+    (par_dir / "ESL-EGCF_011_001.CSV").write_bytes(ODYSSEY_EXPORT.encode("utf-8"))
+    out_dir = tmp_path / "processed"
+
+    main([str(raw_dir), "--out-dir", str(out_dir), *GEOMETRY])
+    assert pl.read_parquet(out_dir / "par.parquet").is_empty()
+
+    main([str(raw_dir), "--out-dir", str(out_dir), *GEOMETRY, "--par-dir", str(par_dir)])
+    assert pl.read_parquet(out_dir / "par.parquet").height == 3

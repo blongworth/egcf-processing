@@ -1,0 +1,4 @@
+sensor_number,serial_number,cal_date,interval_s,slope,intercept,notes
+1,50472,,,0.4647,6.4541,CRISPEE test deployment vs calibrated PME PAR logger (loadPAR.m)
+2,,,,0.2266,-2.6368,CRISPEE test deployment vs calibrated PME PAR logger (loadPAR.m)
+3,,,,0.6644,-2.8579,CRISPEE test deployment vs calibrated PME PAR logger (loadPAR.m)

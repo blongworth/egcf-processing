@@ -7,6 +7,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from egcf_processing.combine import STATUS_SCHEMA, VALVE_SCHEMA
+from egcf_processing.par import PAR_SCHEMA
 from egcf_processing.dashboard import (
     active_chamber_spans,
     align_slider_bounds,
@@ -1143,3 +1144,52 @@ def test_sidebar_time_range_filter_absent_for_a_single_instant_dataset(tmp_path)
     assert not at.exception
     assert not at.sidebar.selectbox
     assert not at.sidebar.slider
+
+
+def _write_par(tmp_path, calibrated=True):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, 1), datetime(2026, 1, 1, 0, 0, 11)],
+            "scan_no": [1, 2],
+            "par_raw": [100.0, 300.0],
+            "par_umol_m2_s": [52.9, 145.9] if calibrated else [None, None],
+            "serial_number": ["50472", "50472"],
+            "sensor_number": [1, 1],
+            "cal_date": [None, None],
+            "interval_s": [300.0, 300.0],
+        },
+        schema=PAR_SCHEMA,
+    ).write_parquet(tmp_path / "par.parquet")
+
+
+def _measurements_subplot_titles(tmp_path):
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+    spec = json.loads(at.tabs[1].get("plotly_chart")[0].proto.spec)
+    return at, spec, [a["text"] for a in spec["layout"]["annotations"]]
+
+
+def test_measurements_tab_renders_par_panel_on_shared_axis(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, i) for i in range(4)],
+            "mass": [2, 40, 2, 40],
+            "current": [10.0, 100.0, 20.0, 200.0],
+        }
+    ).write_parquet(tmp_path / "rga.parquet")
+    _write_par(tmp_path)
+
+    _at, spec, titles = _measurements_subplot_titles(tmp_path)
+    assert titles[-1] == "PAR (µmol photons m⁻² s⁻¹)"
+    par_trace = [d for d in spec["data"] if d["name"] == "par_umol_m2_s"][0]
+    assert spec["layout"][par_trace["xaxis"].replace("x", "xaxis")]["matches"] == "x"
+
+
+def test_measurements_tab_falls_back_to_raw_par_when_uncalibrated(tmp_path):
+    _write_par(tmp_path, calibrated=False)
+
+    at, _spec, titles = _measurements_subplot_titles(tmp_path)
+    assert titles == ["PAR (raw counts, uncalibrated)"]
+    assert any("No PAR calibration matched" in i.value for i in at.tabs[1].info)

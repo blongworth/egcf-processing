@@ -27,7 +27,7 @@ from egcf_processing.cycles import chamber_cycle_windows
 from egcf_processing.flux import compute_fluxes, linear_fit
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
 
-TABLE_NAMES = ["status", "system_health", "rga", "scalup", "valve", "egcf_rga_scans", "egcf_chamber_cycles"]
+TABLE_NAMES = ["status", "system_health", "rga", "scalup", "valve", "par", "egcf_rga_scans", "egcf_chamber_cycles"]
 
 _MASS_COLOR_PALETTE = px.colors.qualitative.Plotly
 
@@ -735,6 +735,29 @@ def render_measurements_tab(
                 sections.append(
                     (label, [go.Scatter(x=scalup["ts"], y=scalup[actual_col], mode="lines", name=col)], False, False)
                 )
+
+    par = tables["par"]
+    if par is None or par.is_empty():
+        _empty_state("PAR")
+    elif par["par_umol_m2_s"].drop_nulls().is_empty():
+        st.info("No PAR calibration matched this logger; plotting uncalibrated raw counts.")
+        sections.append(
+            (
+                "PAR (raw counts, uncalibrated)",
+                [go.Scatter(x=par["ts"], y=par["par_raw"], mode="lines", name="par_raw")],
+                False,
+                False,
+            )
+        )
+    else:
+        sections.append(
+            (
+                "PAR (µmol photons m⁻² s⁻¹)",
+                [go.Scatter(x=par["ts"], y=par["par_umol_m2_s"], mode="lines", name="par_umol_m2_s")],
+                False,
+                False,
+            )
+        )
 
     _render_linked_timeseries(sections, title="Measurements", chamber_spans=chamber_spans)
 
