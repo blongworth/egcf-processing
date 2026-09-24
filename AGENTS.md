@@ -303,24 +303,39 @@ low; test by checking whether clear-sky noon maxima decline over the record) and
 shading** (the logger sees ambient PAR; the enclosed sediment sees that times the chamber's
 transmittance, which hasn't been measured).
 
+**PAR on Layer D.** Every `egcf_fluxes` row carries `par_mean_umol_m2_s`,
+`par_integrated_mol_m2` and `par_coverage` for its experiment. They come from
+`flux.attach_experiment_par()`, called in `pipeline.run()` after `compute_fluxes()`. The span is
+the **whole experiment**, not individual cycles: the chambers stay sealed for the entire
+experiment, so each flux reflects that span's light history. Both chambers share the span.
+`cycles.experiment_spans()` defines it as running from the experiment's first `Re` transition to
+the last surviving cycle's `window_end`. The start doesn't depend on `settle_offset_s`; the end can
+lose a too-short last cycle, which is under 60 s at the default settle offset. On the real
+deployment the spans are 3 h.
+
+- `par_integrated_mol_m2` is Σ(calibrated reading × `interval_s`) / 1e6 over the readings in the
+  span. It is **not extrapolated** over gaps.
+- `par_coverage` is logged seconds / span seconds, capped at 1. It tells you how much of the span
+  the integral represents.
+- An experiment with no calibrated readings gets nulls, never zeros.
+
+`compute_fluxes()` itself is unchanged, so the dashboard's live flux table doesn't carry these
+columns. Only the written `egcf_fluxes` does.
+
 #### Suggested next steps (not implemented)
 
-1. **Per-experiment PAR on Layer D** (`flux.py`): join mean and integrated PAR over each
-   experiment's full incubation span onto every flux row (`par_mean_umol_m2_s`,
-   `par_integrated_mol_m2`). Use the whole experiment, not individual cycles. Chambers stay sealed
-   for the whole experiment, so each O2 flux integrates the light history of that entire span.
-2. **`metabolism.py` (Layer E, `egcf_metabolism`)**: classify each O2 flux as light or dark from a
+1. **`metabolism.py` (Layer E, `egcf_metabolism`)**: classify each O2 flux as light or dark from a
    PAR threshold. Dark gives R, light gives NCP, and GPP = NCP + |R|. Fit a Jassby–Platt P–I curve,
    `NCP = Pmax·tanh(α·I/Pmax) − R`, per chamber across experiments, reporting Pmax, α,
    Ik = Pmax/α, and R. `scipy.optimize.curve_fit` would be a new dependency to approve; a
    pure-numpy grid fit is the alternative. Daily integrated metabolism was considered and left out
    of the initial scope.
-3. **Dashboard "Metabolism" section or tab**: O2 flux vs mean PAR scatter, colored by chamber, with
+2. **Dashboard "Metabolism" section or tab**: O2 flux vs mean PAR scatter, colored by chamber, with
    the fitted curve overlaid. Add H⁺ flux vs PAR as a cross-check.
-4. **QC**: daily clear-sky noon-max PAR trend (biofouling), daily light integral
+3. **QC**: daily clear-sky noon-max PAR trend (biofouling), daily light integral
    (mol photons m⁻² d⁻¹) on the Measurements tab, and a chamber-transmittance factor once it's
    measured.
-5. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
+4. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
    the serials for sensors 2 and 3.
 
 ## Data format gotchas (confirmed against real files, not just the README)

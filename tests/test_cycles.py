@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from egcf_processing.cycles import chamber_cycle_windows, dedupe_consecutive
+from egcf_processing.cycles import chamber_cycle_windows, dedupe_consecutive, experiment_spans
 
 VALVE_SCHEMA = {"ts": pl.Datetime, "chamber": pl.Utf8, "flush_state": pl.Utf8}
 
@@ -87,3 +87,29 @@ def test_empty_valve_returns_empty_windows():
     windows, stats = chamber_cycle_windows(pl.DataFrame(schema=VALVE_SCHEMA), settle_offset_s=60)
     assert windows.height == 0
     assert stats == {"total_cycles": 0, "dropped_too_short": 0}
+
+
+def test_experiment_spans_run_from_first_re_to_last_cycle_end_regardless_of_settle():
+    valve = _valve(
+        [
+            (0, "C1", "Re"),
+            (100, "C2", "Re"),
+            (200, "C1", "Fl"),
+            (250, "C2", "Fl"),
+            (300, "C1", "Re"),
+            (400, "C2", "Re"),
+            (500, "C1", "Fl"),
+        ]
+    )
+    for settle in (0.0, 60.0):
+        windows, _ = chamber_cycle_windows(valve, settle_offset_s=settle)
+        spans = experiment_spans(windows, settle)
+        assert spans.to_dicts() == [
+            {"experiment_number": 1, "experiment_start": _ts(0), "experiment_end": _ts(200)},
+            {"experiment_number": 2, "experiment_start": _ts(300), "experiment_end": _ts(500)},
+        ]
+
+
+def test_experiment_spans_empty():
+    windows, _ = chamber_cycle_windows(_valve([]), settle_offset_s=0.0)
+    assert experiment_spans(windows, 0.0).columns == ["experiment_number", "experiment_start", "experiment_end"]

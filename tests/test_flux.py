@@ -6,6 +6,7 @@ import pytest
 from egcf_processing.flux import (
     O2_UMOL_PER_MG,
     ar_solubility_umol_kg,
+    attach_experiment_par,
     compute_fluxes,
     concentration_series,
     gas_solubility_umol_kg,
@@ -289,3 +290,60 @@ def test_nonpositive_geometry_is_rejected():
         compute_fluxes(cycles, 0.0, AREA_M2)
     with pytest.raises(ValueError):
         compute_fluxes(cycles, VOLUME_L, -1.0)
+
+
+def _spans():
+    return pl.DataFrame(
+        {
+            "experiment_number": [1, 2],
+            "experiment_start": [datetime(2026, 1, 1, 0, 0), datetime(2026, 1, 1, 1, 0)],
+            "experiment_end": [datetime(2026, 1, 1, 0, 20), datetime(2026, 1, 1, 1, 20)],
+        }
+    )
+
+
+def _par(minutes, values, interval_s=300.0):
+    return pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1) + timedelta(minutes=m) for m in minutes],
+            "par_umol_m2_s": pl.Series(values, dtype=pl.Float64),
+            "interval_s": [interval_s] * len(minutes),
+        }
+    )
+
+
+def test_attach_experiment_par_mean_integral_and_coverage_over_the_whole_experiment():
+    fluxes = compute_fluxes(_cycles(oxygen_mgL=[8.0, 7.0], pH=[8.0, 7.9]), VOLUME_L, AREA_M2)
+    # Four 5-min readings inside experiment 1's [00:00, 00:20); 00:20 and 00:40 are outside.
+    par = _par([0, 5, 10, 15, 20, 40], [100.0, 200.0, 300.0, 400.0, 999.0, 999.0])
+
+    result = attach_experiment_par(fluxes, par, _spans())
+
+    assert result.height == fluxes.height
+    assert result["par_mean_umol_m2_s"].to_list() == pytest.approx([250.0] * result.height)
+    assert result["par_integrated_mol_m2"].to_list() == pytest.approx([(100 + 200 + 300 + 400) * 300 / 1e6] * result.height)
+    assert result["par_coverage"].to_list() == pytest.approx([1.0] * result.height)
+
+
+def test_attach_experiment_par_partial_coverage_is_reported_not_extrapolated():
+    fluxes = compute_fluxes(_cycles(oxygen_mgL=[8.0, 7.0]), VOLUME_L, AREA_M2)
+    result = attach_experiment_par(fluxes, _par([15], [400.0]), _spans())
+    assert result["par_coverage"][0] == pytest.approx(0.25)
+    assert result["par_integrated_mol_m2"][0] == pytest.approx(400 * 300 / 1e6)
+
+
+def test_attach_experiment_par_null_without_calibrated_readings():
+    fluxes = compute_fluxes(_cycles(oxygen_mgL=[8.0, 7.0]), VOLUME_L, AREA_M2)
+    uncalibrated = _par([5, 10], [None, None])
+    for par in (uncalibrated, _par([], []), _par([45], [500.0])):
+        result = attach_experiment_par(fluxes, par, _spans())
+        assert result["par_mean_umol_m2_s"][0] is None
+        assert result["par_integrated_mol_m2"][0] is None
+        assert result["par_coverage"][0] is None
+
+
+def test_attach_experiment_par_keeps_columns_on_empty_fluxes():
+    empty = compute_fluxes(_cycles().clear(), VOLUME_L, AREA_M2)
+    result = attach_experiment_par(empty, _par([5], [100.0]), _spans())
+    assert result.is_empty()
+    assert result.schema["par_integrated_mol_m2"] == pl.Float64

@@ -240,6 +240,9 @@ def test_end_to_end_pipeline_writes_par_and_averages_it_onto_cycles(tmp_path):
     chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
     assert chamber_cycles["par_raw"].to_list() == [200.0]
 
+    fluxes = pl.read_parquet(out_dir / "egcf_fluxes.parquet")
+    assert {"par_mean_umol_m2_s", "par_integrated_mol_m2", "par_coverage"} <= set(fluxes.columns)
+
 
 def test_end_to_end_pipeline_without_par_writes_empty_typed_par(tmp_path):
     raw_dir = tmp_path / "raw"

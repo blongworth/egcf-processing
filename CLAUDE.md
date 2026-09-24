@@ -65,7 +65,8 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
    `(chamber, Re)` to the next transition), averaged over `[cycle_start + settle_offset, next_transition)`.
 4. **Layer D (`egcf_fluxes`)** — one row per `(experiment_number, chamber, variable)`: benthic vertical
    flux (`dC/dt * V/A`, in µmol m⁻² h⁻¹) fit from Layer C's cycle averages. Chamber volume and area
-   are required inputs with no default. See `AGENTS.md` for the per-variable formulas and caveats.
+   are required inputs with no default. Each flux row also carries the mean and integrated PAR over
+   its whole experiment (`par_mean_umol_m2_s`, `par_integrated_mol_m2`, `par_coverage`). See `AGENTS.md` for the per-variable formulas and caveats.
 
 Layers B and C share `aggregate.aggregate_onto_windows()` — they differ only in which `windows`
 table they're aggregated onto. If you need a third grain, add another window-boundary function and

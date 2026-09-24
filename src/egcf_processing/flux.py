@@ -54,6 +54,13 @@ _FLUX_SCHEMA = {
     "output_unit": pl.Utf8,
 }
 
+_EXPERIMENT_PAR_SCHEMA = {
+    "experiment_number": pl.Int64,
+    "par_mean_umol_m2_s": pl.Float64,
+    "par_integrated_mol_m2": pl.Float64,
+    "par_coverage": pl.Float64,
+}
+
 _SERIES_SCHEMA = {
     "experiment_number": pl.Int64,
     "chamber": pl.Utf8,
@@ -366,3 +373,35 @@ def compute_fluxes(
     if not rows:
         return pl.DataFrame(schema=_FLUX_SCHEMA)
     return pl.DataFrame(rows, schema=_FLUX_SCHEMA).sort(["experiment_start", "chamber", "variable"])
+
+
+def experiment_par(par: pl.DataFrame, spans: pl.DataFrame) -> pl.DataFrame:
+    """Mean and integrated PAR over each experiment's whole sealed incubation.
+
+    Whole experiment rather than per cycle: the chambers stay sealed for the
+    entire experiment, so every flux fit from it integrates that span's light
+    history. ``par_integrated_mol_m2`` sums each calibrated reading times its
+    logging interval (the Odyssey integrates over the interval) -- it is not
+    extrapolated over gaps, so ``par_coverage`` (logged seconds / span
+    seconds, capped at 1) says how much of the span it represents. An
+    experiment with no calibrated readings gets nulls, never a zero.
+    """
+    if par.is_empty() or spans.is_empty():
+        return pl.DataFrame(schema=_EXPERIMENT_PAR_SCHEMA)
+    readings = (
+        par.drop_nulls("par_umol_m2_s")
+        .sort("ts")
+        .join_asof(spans.sort("experiment_start"), left_on="ts", right_on="experiment_start", strategy="backward")
+        .filter(pl.col("experiment_start").is_not_null() & (pl.col("ts") < pl.col("experiment_end")))
+    )
+    span_s = (pl.col("experiment_end") - pl.col("experiment_start")).first().dt.total_microseconds() / 1_000_000
+    return readings.group_by("experiment_number").agg(
+        pl.col("par_umol_m2_s").mean().alias("par_mean_umol_m2_s"),
+        ((pl.col("par_umol_m2_s") * pl.col("interval_s")).sum() / 1e6).alias("par_integrated_mol_m2"),
+        (pl.col("interval_s").sum() / span_s).clip(upper_bound=1.0).alias("par_coverage"),
+    ).cast(_EXPERIMENT_PAR_SCHEMA)
+
+
+def attach_experiment_par(fluxes: pl.DataFrame, par: pl.DataFrame, spans: pl.DataFrame) -> pl.DataFrame:
+    """Join experiment_par onto every flux row (null columns where there's no PAR)."""
+    return fluxes.join(experiment_par(par, spans), on="experiment_number", how="left")

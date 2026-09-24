@@ -122,3 +122,28 @@ def chamber_cycle_windows(valve: pl.DataFrame, settle_offset_s: float) -> tuple[
 
     windows = valid.select(["window_start", "window_end", "chamber", "experiment_number", "elapsed_time"])
     return windows, stats
+
+
+_SPANS_SCHEMA = {"experiment_number": pl.Int64, "experiment_start": pl.Datetime, "experiment_end": pl.Datetime}
+
+
+def experiment_spans(windows: pl.DataFrame, settle_offset_s: float) -> pl.DataFrame:
+    """One row per experiment: [experiment_start, experiment_end) of the sealed incubation.
+
+    ``windows`` is chamber_cycle_windows' output for the same settle_offset_s.
+    The start is the experiment's first Re transition (window_start minus the
+    settle offset minus elapsed_time), independent of which cycles survived
+    the too-short filter; the end is the last surviving cycle's window_end.
+    Both chambers share the span -- they're sealed for the whole experiment.
+    """
+    if windows.is_empty():
+        return pl.DataFrame(schema=_SPANS_SCHEMA)
+    settle_offset = timedelta(seconds=settle_offset_s)
+    return (
+        windows.group_by("experiment_number")
+        .agg(
+            (pl.col("window_start") - pl.lit(settle_offset) - pl.col("elapsed_time")).min().alias("experiment_start"),
+            pl.col("window_end").max().alias("experiment_end"),
+        )
+        .sort("experiment_number")
+    )

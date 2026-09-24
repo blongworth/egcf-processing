@@ -89,6 +89,9 @@ def run(
     )
 
     layer_d = flux.compute_fluxes(layer_c, chamber_volume_l, chamber_area_m2, n2_ar_sensitivity_ratio)
+    layer_d = flux.attach_experiment_par(
+        layer_d, par_table, cycles.experiment_spans(chamber_windows, settle_offset_s)
+    )
     if n2_ar_sensitivity_ratio == 1.0:
         logger.warning(
             "n2_ar_sensitivity_ratio is 1.0 (uncalibrated): N2:Ar flux magnitude is not quantitative -- "
