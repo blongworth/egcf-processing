@@ -69,9 +69,25 @@ def _parse_p(payload: str) -> dict | None:
     if len(fields) == 6:
         ts_rtc_str, ts_scalup_str, temp_str, sal_str, oxygen_str, ph_str = fields
         pressure_mbar = None
+        field_mask = None
     elif len(fields) == 7:
         ts_rtc_str, ts_scalup_str, temp_str, sal_str, pressure_str, oxygen_str, ph_str = fields
         pressure_mbar = _parse_float(pressure_str)
+        field_mask = None
+    elif len(fields) == 8:
+        (
+            ts_rtc_str,
+            ts_scalup_str,
+            temp_str,
+            sal_str,
+            pressure_str,
+            oxygen_str,
+            ph_str,
+            field_mask_str,
+        ) = fields
+        pressure_mbar = _parse_float(pressure_str)
+        field_mask_val = _parse_float(field_mask_str)
+        field_mask = int(field_mask_val) if field_mask_val is not None else None
     else:
         return None
     ts = _parse_ts(ts_rtc_str)
@@ -87,6 +103,7 @@ def _parse_p(payload: str) -> dict | None:
         "pressure_mbar": pressure_mbar,
         "oxygen_mgl": _parse_float(oxygen_str),
         "ph": _parse_float(ph_str),
+        "field_mask": field_mask,
     }
 
 

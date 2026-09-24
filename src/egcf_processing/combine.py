@@ -18,6 +18,7 @@ SCALUP_SCHEMA = {
     "pressure_mbar": pl.Float64,
     "oxygen_mgl": pl.Float64,
     "ph": pl.Float64,
+    "field_mask": pl.Int64,
 }
 
 STATUS_SCHEMA = {

@@ -138,3 +138,9 @@ def test_main_par_dir_flag_searches_outside_raw_dir(tmp_path):
 
     main([str(raw_dir), "--out-dir", str(out_dir), *GEOMETRY, "--par-dir", str(par_dir)])
     assert pl.read_parquet(out_dir / "par.parquet").height == 3
+
+
+def test_main_chamber_par_transmittance_flag_reaches_pipeline(tmp_path):
+    raw_dir = _write_raw(tmp_path)
+    with pytest.raises(ValueError, match="chamber_par_transmittance"):
+        main([str(raw_dir), "--out-dir", str(tmp_path / "processed"), *GEOMETRY, "--chamber-par-transmittance", "0"])

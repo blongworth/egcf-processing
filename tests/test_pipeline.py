@@ -247,6 +247,10 @@ def test_end_to_end_pipeline_writes_par_and_averages_it_onto_cycles(tmp_path):
     assert pl.read_parquet(out_dir / "egcf_metabolism.parquet").columns[-2:] == ["ncp_umol_m2_h", "gpp_umol_m2_h"]
     assert "pmax_umol_m2_h" in pl.read_parquet(out_dir / "egcf_pi_fit.parquet").columns
 
+    par_daily = pl.read_parquet(out_dir / "par_daily.parquet")
+    assert stats["n_par_days"] == 1
+    assert par_daily["max_par_umol_m2_s"][0] == pytest.approx(0.4647 * 500 + 6.4541)
+
 
 def test_end_to_end_pipeline_without_par_writes_empty_typed_par(tmp_path):
     raw_dir = tmp_path / "raw"

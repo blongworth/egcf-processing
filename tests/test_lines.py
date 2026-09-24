@@ -58,6 +58,30 @@ def test_parse_p_nan_field():
     assert rec["ph"] is None
 
 
+def test_parse_p_8_field_with_mask():
+    rec = parse_line(
+        "P:2026-09-23T16:03:05Z,2026-09-23T16:03:26,20.310,21.430,1020.630,6.720,7.970,15"
+    )
+    assert rec["field_mask"] == 15
+    assert rec["pressure_mbar"] == 1020.630
+    assert rec["temp_degc"] == 20.310
+    assert rec["sal_psu"] == 21.430
+    assert rec["oxygen_mgl"] == 6.720
+    assert rec["ph"] == 7.970
+
+
+def test_parse_p_8_field_with_na_values():
+    rec = parse_line(
+        "P:2026-09-23T16:03:05Z,2026-09-23T16:03:26,20.310,NA,NA,6.720,7.970,3"
+    )
+    assert rec["sal_psu"] is None
+    assert rec["pressure_mbar"] is None
+    assert rec["temp_degc"] == 20.310
+    assert rec["oxygen_mgl"] == 6.720
+    assert rec["ph"] == 7.970
+    assert rec["field_mask"] == 3
+
+
 def test_parse_status_detailed():
     line = "!:2026-06-02T14:30:00Z,0,1200,50,24,30,28,29,1,1591,8760"
     rec = parse_line(line)

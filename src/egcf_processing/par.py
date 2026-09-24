@@ -23,6 +23,8 @@ from pathlib import Path
 
 import polars as pl
 
+from egcf_processing.flux import ols_fit
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CALIBRATIONS_PATH = Path(__file__).parent / "par_calibrations.csv"
@@ -37,6 +39,17 @@ PAR_SCHEMA = {
     "cal_date": pl.Date,
     "interval_s": pl.Float64,
 }
+
+PAR_DAILY_SCHEMA = {
+    "date": pl.Date,
+    "n_readings": pl.Int64,
+    "coverage": pl.Float64,
+    "dli_mol_m2_d": pl.Float64,
+    "max_par_umol_m2_s": pl.Float64,
+}
+
+SECONDS_PER_DAY = 86_400
+DEFAULT_MIN_DAY_COVERAGE = 0.9
 
 CALIBRATION_SCHEMA = {
     "sensor_number": pl.Int64,
@@ -195,3 +208,58 @@ def read_all_par(
     if end is not None:
         par = par.filter(pl.col("ts") < end)
     return par
+
+
+def daily_par(par: pl.DataFrame) -> pl.DataFrame:
+    """Per-UTC-day light QC: daily light integral and daily maximum PAR.
+
+    UTC day boundaries fall at ~20:00 EDT, after Woods Hole sunset, so each
+    UTC day holds one whole photoperiod. ``dli_mol_m2_d`` sums calibrated
+    readings times their interval and is not extrapolated over gaps;
+    ``coverage`` (logged seconds / 86400, capped at 1) marks the partial first
+    and last days. Uncalibrated days get null DLI and max, never zeros.
+    """
+    if par.is_empty():
+        return pl.DataFrame(schema=PAR_DAILY_SCHEMA)
+    calibrated = pl.col("par_umol_m2_s").is_not_null()
+    return (
+        par.group_by(pl.col("ts").dt.date().alias("date"))
+        .agg(
+            pl.len().cast(pl.Int64).alias("n_readings"),
+            (pl.col("interval_s").sum() / SECONDS_PER_DAY).clip(upper_bound=1.0).alias("coverage"),
+            pl.when(calibrated.any())
+            .then((pl.col("par_umol_m2_s") * pl.col("interval_s")).sum() / 1e6)
+            .alias("dli_mol_m2_d"),
+            pl.col("par_umol_m2_s").max().alias("max_par_umol_m2_s"),
+        )
+        .cast(PAR_DAILY_SCHEMA)
+        .sort("date")
+    )
+
+
+def daily_max_trend(daily: pl.DataFrame, min_coverage: float = DEFAULT_MIN_DAY_COVERAGE) -> dict | None:
+    """OLS trend of daily max PAR over full days, a screen for diffuser biofouling.
+
+    Fouling reads progressively low, so a sustained decline in the daily
+    maximum is the signature -- but cloudy days lower it too, so this flags
+    days to inspect rather than proving fouling. Returns slope in
+    umol m^-2 s^-1 per day and as a percent of the mean daily max, or None
+    with fewer than two full days.
+    """
+    full = daily.filter((pl.col("coverage") >= min_coverage) & pl.col("max_par_umol_m2_s").is_not_null())
+    if full.height < 2:
+        return None
+    day0 = full["date"].min()
+    x = [(d - day0).days for d in full["date"].to_list()]
+    fit = ols_fit(x, full["max_par_umol_m2_s"].to_list())
+    if fit is None:
+        return None
+    mean_max = full["max_par_umol_m2_s"].mean()
+    return {
+        "slope_umol_m2_s_per_day": fit["slope"],
+        "intercept_umol_m2_s": fit["intercept"],
+        "pct_per_day": 100 * fit["slope"] / mean_max if mean_max else None,
+        "r2": fit["r2"],
+        "n_days": fit["n"],
+        "first_date": day0,
+    }

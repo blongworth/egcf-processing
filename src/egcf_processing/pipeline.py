@@ -20,6 +20,7 @@ DEFAULT_PAR_TIME_OFFSET_H = 0.0
 DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S = metabolism.DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S
 DEFAULT_MIN_PAR_COVERAGE = metabolism.DEFAULT_MIN_PAR_COVERAGE
 DEFAULT_METABOLISM_MIN_R2 = metabolism.DEFAULT_MIN_R2
+DEFAULT_CHAMBER_PAR_TRANSMITTANCE = metabolism.DEFAULT_CHAMBER_PAR_TRANSMITTANCE
 
 
 def run(
@@ -40,6 +41,7 @@ def run(
     dark_par_threshold_umol_m2_s: float = DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
     min_par_coverage: float = DEFAULT_MIN_PAR_COVERAGE,
     metabolism_min_r2: float = DEFAULT_METABOLISM_MIN_R2,
+    chamber_par_transmittance: float = DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
 ) -> dict:
     files = discovery.find_all_files(raw_dir)
     logger.info("found %d gems_*.txt/surface_*_lander.log file(s) under %s", len(files), raw_dir)
@@ -64,6 +66,19 @@ def run(
     )
     par_path = combine.write_df(par_table, out_dir, "par", output_format)
     logger.info("wrote par (%d rows) -> %s", par_table.height, par_path)
+    par_daily = par.daily_par(par_table)
+    par_daily_path = combine.write_df(par_daily, out_dir, "par_daily", output_format)
+    logger.info("wrote par_daily (%d rows) -> %s", par_daily.height, par_daily_path)
+    trend = par.daily_max_trend(par_daily)
+    if trend is not None:
+        logger.info(
+            "daily max PAR trend over %d full day(s): %+.1f umol m-2 s-1 per day (%+.1f%%/day, r2=%.2f) -- "
+            "a sustained decline suggests diffuser biofouling; cloudy days also lower it",
+            trend["n_days"],
+            trend["slope_umol_m2_s_per_day"],
+            trend["pct_per_day"],
+            trend["r2"],
+        )
 
     chamber_windows, cycle_stats = cycles.chamber_cycle_windows(tables["valve"], settle_offset_s)
     logger.info(
@@ -104,8 +119,15 @@ def run(
             "measure it with flux.n2_ar_sensitivity_from_standard() against an air-equilibrated standard"
         )
 
-    layer_e = metabolism.classify_o2_fluxes(layer_d, dark_par_threshold_umol_m2_s, min_par_coverage, metabolism_min_r2)
-    pi_fit = metabolism.fit_pi_curves(layer_e)
+    layer_e = metabolism.classify_o2_fluxes(
+        layer_d, dark_par_threshold_umol_m2_s, min_par_coverage, metabolism_min_r2, chamber_par_transmittance
+    )
+    pi_fit = metabolism.fit_pi_curves(layer_e, chamber_par_transmittance)
+    if chamber_par_transmittance == 1.0 and layer_e["used"].any():
+        logger.warning(
+            "chamber_par_transmittance is 1.0 (unmeasured): the dark threshold and P-I parameters are relative "
+            "to ambient PAR at the logger, not PAR at the sediment inside the chamber"
+        )
 
     scans_path = combine.write_df(layer_b, out_dir, "egcf_rga_scans", output_format)
     cycles_path = combine.write_df(layer_c, out_dir, "egcf_chamber_cycles", output_format)
@@ -123,6 +145,7 @@ def run(
         "n_records": len(records),
         "n_system_health_rows": tables["system_health"].height,
         "n_par_rows": par_table.height,
+        "n_par_days": par_daily.height,
         "cycle_stats": cycle_stats,
         "layer_b_rows": layer_b.height,
         "layer_c_rows": layer_c.height,

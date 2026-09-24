@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from egcf_processing.pipeline import (
+    DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
     DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
     DEFAULT_METABOLISM_MIN_R2,
     DEFAULT_MIN_PAR_COVERAGE,
@@ -119,6 +120,13 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_METABOLISM_MIN_R2,
         help="Minimum O2 flux fit r2 to use it in metabolism/P-I (default 0: near-zero fluxes have low r2)",
     )
+    parser.add_argument(
+        "--chamber-par-transmittance",
+        type=float,
+        default=DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
+        help="Fraction of ambient PAR the chamber walls and lid transmit to the sediment, in (0, 1]; "
+        "1.0 (default) means unmeasured, so metabolism/P-I use ambient PAR",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -141,6 +149,7 @@ def main(argv: list[str] | None = None) -> None:
         dark_par_threshold_umol_m2_s=args.dark_par_threshold,
         min_par_coverage=args.min_par_coverage,
         metabolism_min_r2=args.metabolism_min_r2,
+        chamber_par_transmittance=args.chamber_par_transmittance,
     )
 
 

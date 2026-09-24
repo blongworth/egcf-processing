@@ -25,7 +25,8 @@ uv run pytest tests/test_cycles.py::test_name  # run a single test
 uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
     [--settle-offset-s 60] [--format parquet|csv] \
     [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>] \
-    [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0]
+    [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0] \
+    [--chamber-par-transmittance 1.0]
 uv run streamlit run dashboard.py  # launch the read-only dashboard
 ```
 
@@ -59,7 +60,8 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
 1. **Layer A (raw combined)** — every raw file (gems + surface) parsed and concatenated by tag into
    `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`), plus
    `system_health.parquet` (`SH`, from `surface_*_events.log` via `events.py`), and `par.parquet`
-   (Odyssey PAR logger CSVs via `par.py`, identified by header content; also averaged onto B/C).
+   (Odyssey PAR logger CSVs via `par.py`, identified by header content; also averaged onto B/C),
+   plus `par_daily.parquet` (per-UTC-day light integral and max PAR, the biofouling screen).
    No aggregation. Written first; every later stage reads from these, not from raw files again.
 2. **Layer B (`egcf_rga_scans`)** — one row per RGA mass-scan cycle, boundaries detected from the
    data itself (a "masses seen in this scan" set that resets on a repeat).
@@ -71,7 +73,9 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
    its whole experiment (`par_mean_umol_m2_s`, `par_integrated_mol_m2`, `par_coverage`).
 5. **Layer E (`egcf_metabolism`, `egcf_pi_fit`)** — each O2 flux classified light/dark by mean PAR,
    with R, NCP, and GPP, plus a per-chamber Jassby–Platt P–I fit (Pmax, α, R, Ik). Excluded
-   fluxes are kept with an `excluded_reason`. See `AGENTS.md` for thresholds and units. See `AGENTS.md` for the per-variable formulas and caveats.
+   fluxes are kept with an `excluded_reason`. PAR here is ambient × `--chamber-par-transmittance`
+   (default 1.0 = unmeasured). The dashboard's Metabolism tab plots these outputs. See `AGENTS.md`
+   for thresholds and units. See `AGENTS.md` for the per-variable formulas and caveats.
 
 Layers B and C share `aggregate.aggregate_onto_windows()` — they differ only in which `windows`
 table they're aggregated onto. If you need a third grain, add another window-boundary function and

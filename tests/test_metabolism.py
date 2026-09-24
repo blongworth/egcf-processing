@@ -121,3 +121,22 @@ def test_fit_empty_input_keeps_schema():
     fit = fit_pi_curves(classify_o2_fluxes(_fluxes([None], [1.0])))
     assert fit.is_empty()
     assert fit.columns == list(PI_FIT_SCHEMA)
+
+
+def test_transmittance_scales_chamber_par_used_for_period_and_fit():
+    par = [6.5, 30.0, 200.0, 500.0, 1000.0, 1400.0]
+    o2 = jassby_platt(np.array(par) * 0.5, 2000.0, 8.0, 300.0).tolist()
+    m = classify_o2_fluxes(_fluxes(par, o2), chamber_par_transmittance=0.5)
+    assert m["par_chamber_umol_m2_s"].to_list() == pytest.approx([p * 0.5 for p in par])
+    assert m["par_mean_umol_m2_s"].to_list() == pytest.approx(par)
+    # 30 ambient is light, but 15 inside the chamber is dark.
+    assert m["period"].to_list()[:2] == ["dark", "dark"]
+    fit = fit_pi_curves(m, chamber_par_transmittance=0.5).row(0, named=True)
+    assert fit["chamber_par_transmittance"] == 0.5
+    assert fit["alpha_umol_m2_h_per_par"] == pytest.approx(8.0, rel=1e-3)
+
+
+def test_transmittance_out_of_range_is_rejected():
+    for bad in (0.0, 1.5):
+        with pytest.raises(ValueError):
+            classify_o2_fluxes(_fluxes([500.0], [1.0]), chamber_par_transmittance=bad)

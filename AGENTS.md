@@ -42,7 +42,7 @@ data/              # gitignored -- raw logs and processed output live here, neve
 `tests/test_golden.py` runs the real pipeline (discovery through Layers B and C)
 against `tests/fixtures/gems_gold_standard.txt` -- one experiment, two 30s chamber
 cycles (C1 then C2), two RGA masses spread across three complete mass-scan cycles
-(two within C1, one within C2), one detailed `!:` status line, and both real `P:`
+(two within C1, one within C2), one detailed `!:` status line, and all three real `P:`
 field-count eras (6-field and 7-field, both merged into the same window's scalup
 average) -- small enough to verify entirely by hand -- and compares the resulting
 `egcf_chamber_cycles.csv` and
@@ -298,14 +298,46 @@ silent offset puts dawn/dusk incubations at the wrong irradiance and bends any P
 **Unit naming**: PAR is µmol photons m⁻² **s**⁻¹ (`par_umol_m2_s`) while fluxes are µmol m⁻²
 **h**⁻¹. Keep the `_s` suffix on any derived PAR column so the two can't be confused.
 
-The dashboard's Measurements tab plots `par_umol_m2_s` as the last panel on the shared, linked
-time axis, with the chamber shading, so light lines up against O2 and pH. If every calibrated
-value is null, it plots `par_raw` as "PAR (raw counts, uncalibrated)" with an `st.info`.
+The dashboard's Measurements tab plots `par_umol_m2_s` on the shared, linked time axis, with the
+chamber shading, so light lines up against O2 and pH. If every calibrated value is null, it plots
+`par_raw` as "PAR (raw counts, uncalibrated)" with an `st.info`.
 
-Not handled yet (see suggestions below): **biofouling** (a fouling diffuser reads progressively
-low; test by checking whether clear-sky noon maxima decline over the record) and **chamber
-shading** (the logger sees ambient PAR; the enclosed sediment sees that times the chamber's
-transmittance, which hasn't been measured).
+**Daily light QC (`par.daily_par`, `par.daily_max_trend`).** `par_daily.parquet` has one row per
+**UTC** day: `n_readings`, `coverage`, `dli_mol_m2_d` (the daily light integral) and
+`max_par_umol_m2_s`.
+- UTC days work here because UTC midnight is ~20:00 EDT, after Woods Hole sunset, so each UTC day
+  holds one whole photoperiod. Recheck this for a deployment far from this longitude.
+- `dli_mol_m2_d` is Σ(reading × interval) and is not extrapolated over gaps. `coverage` flags
+  the partial first and last days.
+- `daily_max_trend` is an OLS fit of daily max against day number, over full days only
+  (`coverage` ≥ 0.9). It's the **biofouling screen**: a fouling diffuser reads progressively low.
+  Cloudy days lower the daily max too, so a decline is a prompt to inspect, not proof of fouling.
+  `pipeline.run()` logs it at INFO.
+- The Measurements tab computes the same two quantities from the time-filtered `par` table, so
+  they follow the sidebar filter. They appear as two more linked panels: DLI bars, and daily-max
+  markers with the trend line. Partial days are faded and left out of the trend.
+
+**Chamber shading (`--chamber-par-transmittance`).** The logger sees ambient PAR, while the
+enclosed sediment sees that times the fraction the chamber walls and lid pass.
+- The default is 1.0, meaning **unmeasured**. `pipeline.run()` then WARNs that the dark threshold
+  and P–I parameters are relative to ambient light.
+- The factor must be in (0, 1]. It applies only in Layer E: `egcf_metabolism.par_chamber_umol_m2_s`
+  = ambient mean × transmittance. That value drives the light/dark split and the P–I fit, and
+  `egcf_pi_fit.chamber_par_transmittance` records it.
+- Layer A–D PAR columns stay **ambient**, because they describe the sensor.
+
+**Dashboard Metabolism tab** (`render_metabolism_tab`). This tab reads the pipeline's
+`egcf_metabolism`, `egcf_pi_fit` and `egcf_fluxes` outputs; it doesn't recompute them. Chamber
+geometry, dark threshold and transmittance are therefore fixed at processing time, and the
+sidebar geometry doesn't apply here, unlike the Experiment Data tab's live flux.
+- The chart has two subplots sharing the PAR x-axis, each with its own y-axis, so it's never a
+  dual axis. The top shows O2 flux, with the fitted Jassby–Platt curve for each converged
+  chamber. The bottom shows H⁺ flux, which should run opposite to O2. It's omitted if there are
+  no `h_ion` rows.
+- Points use `par_chamber_umol_m2_s` and `chamber_color_map` colours. Excluded fluxes are hollow
+  markers, with the reason in the hover. Fluxes with no PAR aren't placed.
+- Below the chart: the P–I parameter table, and an expander with the light incubations' NCP/GPP.
+- These three tables have no `ts`/`timestamp` column, so the sidebar time filter leaves them alone.
 
 **PAR on Layer D.** Every `egcf_fluxes` row carries `par_mean_umol_m2_s`,
 `par_integrated_mol_m2` and `par_coverage` for its experiment. They come from
@@ -365,13 +397,9 @@ check to repeat on each new deployment.
 
 #### Suggested next steps (not implemented)
 
-1. **Dashboard "Metabolism" section or tab**: O2 flux vs mean PAR scatter from `egcf_metabolism`,
-   colored by chamber, with the `egcf_pi_fit` curve overlaid. Add H⁺ flux vs PAR as a cross-check.
-2. **QC**: daily clear-sky noon-max PAR trend (biofouling), daily light integral
-   (mol photons m⁻² d⁻¹) on the Measurements tab, and a chamber-transmittance factor once it's
-   measured.
-3. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
+1. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
    the serials for sensors 2 and 3.
+2. **Measure the chamber PAR transmittance** and pass it with `--chamber-par-transmittance`.
 
 ## Data format gotchas (confirmed against real files, not just the README)
 
@@ -384,8 +412,12 @@ check to repeat on each new deployment.
   `V:<ts>,<C1/C2>,<Re/Fl/Unknown>` format is parsed. This means chamber/experiment context is only
   available from ~2026-08-10T19:52 onward in the current test corpus — large null stretches before
   that are correct, not a bug.
-- **`P:` has two field-count eras**, both still in use in real data: 6 fields (no `pressure_mbar`)
-  and 7 fields (matches the README). `lines.py` branches on field count, not on date.
+- **`P:` has three field-count eras**, all still in use in real data: 6 fields (no
+  `pressure_mbar`), 7 fields (matches the README), and 8 fields (adds a trailing `fieldMask`
+  unsigned-int bitmask of which sensor groups reported, first seen 2026-09-23). In the 8-field
+  era, any sensor value can come through as `NA` instead of a number when its mask bit is clear
+  -- already handled by `_parse_float`'s null-token check. `lines.py` branches on field count, not
+  on date.
 - **`!:` (status) never occurs in the real gems (SD-card) test corpus** — it does occur in the surface
   corpus, see above. None of the README's other untimestamped tags (`TS,`, `TP,`, `PS,`, `VS,`, `S,`,
   `CFG,`, `ST,`, `RE,`, `OK,`/`ACK,`/`DONE,`/`ERR,`) occur in either corpus.
@@ -436,14 +468,14 @@ check to repeat on each new deployment.
 `src/egcf_processing/dashboard.py`. It's a **read-only viewer** over an
 already-processed `data/processed`-style directory (parquet, falling back to
 csv per table if no parquet exists) — it has no control to trigger a
-pipeline run itself, by design. Three tabs: Status (turbo speed/power/temp, water
+pipeline run itself, by design. Four tabs: Status (turbo speed/power/temp, water
 pump RPM, plus total pressure only if `status.parquet` has any non-null
 `raw_total_pressure_current` — currently always empty against real data, so
 this is normally a "no data" message, not a bug), Measurements (RGA mass
 data plus scalup sonde data, all with a raw/Amps/Torr unit toggle reusing
 `aggregate.py`'s conversion constants), and Experiment Data (per-experiment
 C1-vs-C2 comparison of one RGA mass or other variable against elapsed time,
-in minutes). The status tab's "current" plot is deliberately
+in minutes), and Metabolism (O2/H⁺ flux vs PAR with the P–I fit; see the PAR section). The status tab's "current" plot is deliberately
 `turbo_power_w` — there's no field literally named "current" in
 `STATUS_SCHEMA` besides the pressure ion current, which already gets its own
 plot; this was an explicit user choice, not a guess.

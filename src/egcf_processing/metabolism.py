@@ -10,6 +10,11 @@ PAR threshold:
 - light: net community production, NCP = the O2 flux, and gross production
   GPP = NCP + R (assumes light respiration equals dark respiration).
 
+I is ``par_chamber_umol_m2_s`` = the logger's ambient experiment-mean PAR
+times ``chamber_par_transmittance`` (the fraction the chamber walls and lid
+pass). It defaults to 1.0 -- unmeasured -- in which case every threshold and
+fit parameter is relative to ambient light, not light at the sediment.
+
 The P-I fit is Jassby & Platt (1976), NCP = Pmax*tanh(alpha*I/Pmax) - R, over
 light and dark points together, per chamber. I is PAR in umol photons m^-2 s^-1
 while fluxes are umol O2 m^-2 h^-1, so alpha's unit is (umol O2 m^-2 h^-1) per
@@ -30,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Night-time PAR reads the calibration intercept (6.45 umol m^-2 s^-1 for
 # sensor 1), not 0, and dusk/dawn experiments average a little above it.
 DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S = 20.0
+DEFAULT_CHAMBER_PAR_TRANSMITTANCE = 1.0
 DEFAULT_MIN_PAR_COVERAGE = 0.9
 # No r2 filter by default: a flux near zero (e.g. at the compensation
 # irradiance) is a flat line whose r2 is low by construction, so filtering
@@ -44,6 +50,7 @@ METABOLISM_SCHEMA = {
     "par_mean_umol_m2_s": pl.Float64,
     "par_integrated_mol_m2": pl.Float64,
     "par_coverage": pl.Float64,
+    "par_chamber_umol_m2_s": pl.Float64,
     "o2_flux_umol_m2_h": pl.Float64,
     "r2": pl.Float64,
     "period": pl.Utf8,
@@ -55,6 +62,7 @@ METABOLISM_SCHEMA = {
 
 PI_FIT_SCHEMA = {
     "chamber": pl.Utf8,
+    "chamber_par_transmittance": pl.Float64,
     "n_points": pl.Int64,
     "n_light": pl.Int64,
     "n_dark": pl.Int64,
@@ -80,16 +88,19 @@ def classify_o2_fluxes(
     dark_par_threshold_umol_m2_s: float = DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
     min_par_coverage: float = DEFAULT_MIN_PAR_COVERAGE,
     min_r2: float = DEFAULT_MIN_R2,
+    chamber_par_transmittance: float = DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
 ) -> pl.DataFrame:
     """One row per O2 flux: light/dark period, whether it's used, NCP and GPP.
 
     Excluded rows are kept with an ``excluded_reason`` rather than dropped.
     R for GPP is each chamber's mean over *used* dark rows.
     """
+    if not 0 < chamber_par_transmittance <= 1:
+        raise ValueError("chamber_par_transmittance must be in (0, 1]")
     o2 = fluxes.filter(pl.col("variable") == "oxygen")
     if o2.is_empty() or "par_mean_umol_m2_s" not in o2.columns:
         return pl.DataFrame(schema=METABOLISM_SCHEMA)
-    par = pl.col("par_mean_umol_m2_s")
+    par = pl.col("par_chamber_umol_m2_s")
     rows = o2.select(
         "experiment_number",
         "chamber",
@@ -97,6 +108,7 @@ def classify_o2_fluxes(
         "par_mean_umol_m2_s",
         "par_integrated_mol_m2",
         "par_coverage",
+        (pl.col("par_mean_umol_m2_s") * chamber_par_transmittance).alias("par_chamber_umol_m2_s"),
         pl.col("output_value").alias("o2_flux_umol_m2_h"),
         "r2",
     ).with_columns(
@@ -133,12 +145,13 @@ def classify_o2_fluxes(
     )
 
 
-def _fit_chamber(chamber: str, group: pl.DataFrame) -> dict:
+def _fit_chamber(chamber: str, group: pl.DataFrame, chamber_par_transmittance: float) -> dict:
     light = group.filter(pl.col("period") == "light")
     dark = group.filter(pl.col("period") == "dark")
     row = {k: None for k in PI_FIT_SCHEMA}
     row.update(
         chamber=chamber,
+        chamber_par_transmittance=chamber_par_transmittance,
         n_points=group.height,
         n_light=light.height,
         n_dark=dark.height,
@@ -155,11 +168,11 @@ def _fit_chamber(chamber: str, group: pl.DataFrame) -> dict:
         )
         return row
 
-    par = group["par_mean_umol_m2_s"].to_numpy()
+    par = group["par_chamber_umol_m2_s"].to_numpy()
     flux = group["o2_flux_umol_m2_h"].to_numpy()
     r0 = row["r_dark_umol_m2_h"] if row["r_dark_umol_m2_h"] is not None else -float(flux.min())
     pmax0 = max(float(flux.max()) + r0, 1.0)
-    alpha0 = pmax0 / max(float(np.median(light["par_mean_umol_m2_s"].to_numpy())), 1.0)
+    alpha0 = pmax0 / max(float(np.median(light["par_chamber_umol_m2_s"].to_numpy())), 1.0)
     try:
         popt, pcov = curve_fit(
             jassby_platt,
@@ -191,10 +204,19 @@ def _fit_chamber(chamber: str, group: pl.DataFrame) -> dict:
     return row
 
 
-def fit_pi_curves(metabolism: pl.DataFrame) -> pl.DataFrame:
-    """Per-chamber Jassby-Platt fit over the used rows of classify_o2_fluxes' output."""
+def fit_pi_curves(
+    metabolism: pl.DataFrame, chamber_par_transmittance: float = DEFAULT_CHAMBER_PAR_TRANSMITTANCE
+) -> pl.DataFrame:
+    """Per-chamber Jassby-Platt fit over the used rows of classify_o2_fluxes' output.
+
+    ``chamber_par_transmittance`` must match the value classify_o2_fluxes was
+    given; it's only recorded here, so each fit row says what light basis its
+    alpha and Ik are on.
+    """
     used = metabolism.filter(pl.col("used"))
     if used.is_empty():
         return pl.DataFrame(schema=PI_FIT_SCHEMA)
-    rows = [_fit_chamber(chamber, group) for (chamber,), group in used.group_by(["chamber"])]
+    rows = [
+        _fit_chamber(chamber, group, chamber_par_transmittance) for (chamber,), group in used.group_by(["chamber"])
+    ]
     return pl.DataFrame(rows, schema=PI_FIT_SCHEMA).sort("chamber")

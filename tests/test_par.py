@@ -8,6 +8,8 @@ from egcf_processing.discovery import find_par_files
 from egcf_processing.par import (
     CALIBRATION_SCHEMA,
     calibrate,
+    daily_max_trend,
+    daily_par,
     is_odyssey_export,
     read_all_par,
     read_odyssey_file,
@@ -159,3 +161,40 @@ def test_find_par_files_by_content_skipping_zero_byte(tmp_path):
     (tmp_path / "PAR" / "empty.csv").write_text("")
     (tmp_path / "gems_pump_2025-07-12.csv").write_text("ts,rpm\n")
     assert find_par_files(tmp_path) == [good]
+
+
+def _par_days(days, per_day_values, interval_s=3600.0):
+    """Hourly readings: one list of 24 values per day starting 2026-09-19."""
+    rows = []
+    for d, values in zip(range(days), per_day_values):
+        for h, v in enumerate(values):
+            rows.append({"ts": datetime(2026, 9, 19 + d, h), "par_umol_m2_s": v, "interval_s": interval_s})
+    return pl.DataFrame(rows, schema={"ts": pl.Datetime, "par_umol_m2_s": pl.Float64, "interval_s": pl.Float64})
+
+
+def test_daily_par_dli_max_and_coverage():
+    full = [0.0] * 10 + [500.0, 1000.0, 500.0] + [0.0] * 11
+    daily = daily_par(_par_days(2, [full, [200.0] * 6]))
+    assert daily["date"].to_list() == [date(2026, 9, 19), date(2026, 9, 20)]
+    assert daily["n_readings"].to_list() == [24, 6]
+    assert daily["coverage"].to_list() == pytest.approx([1.0, 0.25])
+    assert daily["dli_mol_m2_d"].to_list() == pytest.approx([2000 * 3600 / 1e6, 1200 * 3600 / 1e6])
+    assert daily["max_par_umol_m2_s"].to_list() == [1000.0, 200.0]
+
+
+def test_daily_par_uncalibrated_day_is_null_not_zero():
+    daily = daily_par(_par_days(1, [[None] * 24]))
+    assert daily["dli_mol_m2_d"][0] is None
+    assert daily["max_par_umol_m2_s"][0] is None
+
+
+def test_daily_max_trend_uses_only_full_days():
+    days = [[0.0] * 11 + [m] + [0.0] * 12 for m in (1000.0, 900.0, 800.0)] + [[5000.0] * 3]
+    trend = daily_max_trend(daily_par(_par_days(4, days)))
+    assert trend["n_days"] == 3
+    assert trend["slope_umol_m2_s_per_day"] == pytest.approx(-100.0)
+    assert trend["pct_per_day"] == pytest.approx(-100.0 / 900.0 * 100)
+
+
+def test_daily_max_trend_none_with_fewer_than_two_full_days():
+    assert daily_max_trend(daily_par(_par_days(2, [[100.0] * 24, [100.0] * 3]))) is None

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
@@ -25,9 +26,23 @@ from egcf_processing.aggregate import (
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
 from egcf_processing.cycles import chamber_cycle_windows
 from egcf_processing.flux import compute_fluxes, linear_fit
+from egcf_processing.metabolism import jassby_platt
+from egcf_processing.par import DEFAULT_MIN_DAY_COVERAGE, daily_max_trend, daily_par
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
 
-TABLE_NAMES = ["status", "system_health", "rga", "scalup", "valve", "par", "egcf_rga_scans", "egcf_chamber_cycles"]
+TABLE_NAMES = [
+    "status",
+    "system_health",
+    "rga",
+    "scalup",
+    "valve",
+    "par",
+    "egcf_rga_scans",
+    "egcf_chamber_cycles",
+    "egcf_fluxes",
+    "egcf_metabolism",
+    "egcf_pi_fit",
+]
 
 _MASS_COLOR_PALETTE = px.colors.qualitative.Plotly
 
@@ -662,6 +677,67 @@ def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sen
     _render_linked_timeseries(sections, title="Status", chamber_spans=chamber_spans)
 
 
+def _par_daily_sections(par: pl.DataFrame) -> list[tuple[str, list, bool, bool]]:
+    """Daily light integral and daily max PAR panels, one bar/marker per UTC day.
+
+    Computed from the (time-range-filtered) par table rather than loaded, so
+    they follow the sidebar filter. Partial days (coverage below
+    DEFAULT_MIN_DAY_COVERAGE) are drawn faded and left out of the trend: their
+    DLI is short by construction, not dim. The trend line is the biofouling
+    screen (see par.daily_max_trend).
+    """
+    daily = daily_par(par).drop_nulls("max_par_umol_m2_s")
+    if daily.is_empty():
+        return []
+    noon = daily.with_columns(
+        (pl.col("date").cast(pl.Datetime) + pl.duration(hours=12)).alias("noon"),
+        (pl.col("coverage") >= DEFAULT_MIN_DAY_COVERAGE).alias("full"),
+    )
+    opacity = [1.0 if full else 0.35 for full in noon["full"]]
+    hover = [
+        f"{d}<br>coverage {c:.0%}" + ("" if full else " (partial day)")
+        for d, c, full in zip(noon["date"], noon["coverage"], noon["full"])
+    ]
+    dli = go.Bar(
+        x=noon["noon"],
+        y=noon["dli_mol_m2_d"],
+        width=[86_400_000 * 0.8] * noon.height,
+        marker={"opacity": opacity},
+        name="daily light integral",
+        customdata=hover,
+        hovertemplate="%{customdata}<br>DLI %{y:.2f} mol m⁻² d⁻¹<extra></extra>",
+    )
+    max_traces = [
+        go.Scatter(
+            x=noon["noon"],
+            y=noon["max_par_umol_m2_s"],
+            mode="markers",
+            marker={"size": 10, "opacity": opacity},
+            name="daily max PAR",
+            text=hover,
+            hovertemplate="%{text}<br>max %{y:.0f} µmol m⁻² s⁻¹<extra></extra>",
+        )
+    ]
+    trend = daily_max_trend(daily)
+    if trend is not None:
+        full_noons = noon.filter(pl.col("full"))["noon"]
+        days = [(t - full_noons.min()).days for t in full_noons]
+        max_traces.append(
+            go.Scatter(
+                x=full_noons,
+                y=[trend["intercept_umol_m2_s"] + trend["slope_umol_m2_s_per_day"] * d for d in days],
+                mode="lines",
+                line={"dash": "dash", "width": 2},
+                name=f"trend {trend['pct_per_day']:+.1f}%/day ({trend['n_days']} full days)",
+                hoverinfo="skip",
+            )
+        )
+    return [
+        ("Daily light integral (mol photons m⁻² d⁻¹)", [dli], False, False),
+        ("Daily max PAR (µmol photons m⁻² s⁻¹) — biofouling screen", max_traces, False, False),
+    ]
+
+
 def render_measurements_tab(
     tables: dict[str, pl.DataFrame | None],
     partial_pressure_sensitivity: float,
@@ -758,6 +834,7 @@ def render_measurements_tab(
                 False,
             )
         )
+        sections += _par_daily_sections(par)
 
     _render_linked_timeseries(sections, title="Measurements", chamber_spans=chamber_spans)
 
@@ -1239,6 +1316,129 @@ def render_experiment_tab(
         )
 
 
+def _pi_curve_traces(pi_fit: pl.DataFrame | None, par_max: float, colors: dict[str, str]) -> list[go.Scatter]:
+    if pi_fit is None or pi_fit.is_empty():
+        return []
+    grid = np.linspace(0.0, par_max * 1.05, 200)
+    traces = []
+    for row in pi_fit.filter(pl.col("converged")).iter_rows(named=True):
+        chamber = row["chamber"]
+        traces.append(
+            go.Scatter(
+                x=grid,
+                y=jassby_platt(grid, row["pmax_umol_m2_h"], row["alpha_umol_m2_h_per_par"], row["r_fit_umol_m2_h"]),
+                mode="lines",
+                line={"color": colors.get(chamber), "width": 2},
+                name=f"{chamber} fit (Ik={row['ik_umol_m2_s']:.0f})",
+                legendgroup=chamber,
+                hoverinfo="skip",
+            )
+        )
+    return traces
+
+
+def _metabolism_scatter(df: pl.DataFrame, y_col: str, chamber: str, color: str, used: bool, show_legend: bool) -> go.Scatter:
+    return go.Scatter(
+        x=df["par_chamber_umol_m2_s"],
+        y=df[y_col],
+        mode="markers",
+        marker={
+            "color": color if used else "rgba(0,0,0,0)",
+            "size": 10,
+            "line": {"color": color, "width": 2},
+        },
+        name=chamber if used else f"{chamber} excluded",
+        legendgroup=chamber,
+        showlegend=show_legend,
+        text=[
+            f"experiment {e} ({p})<br>{t:%Y-%m-%d %H:%M}<br>r²={'n/a' if r is None else f'{r:.2f}'}"
+            + (f"<br>excluded: {x}" if x else "")
+            for e, p, t, r, x in zip(df["experiment_number"], df["period"], df["experiment_start"], df["r2"], df["excluded_reason"])
+        ],
+        hovertemplate="%{text}<br>PAR %{x:.0f}<br>flux %{y:.4g}<extra></extra>",
+    )
+
+
+def render_metabolism_tab(tables: dict[str, pl.DataFrame | None]) -> None:
+    """O2 (and H+) flux against experiment-mean PAR, with the per-chamber P-I fit.
+
+    Reads the pipeline's egcf_metabolism / egcf_pi_fit / egcf_fluxes outputs
+    rather than recomputing, so the chamber geometry, dark threshold and
+    transmittance are whatever the pipeline was run with -- unlike the
+    Experiment tab's live flux, the sidebar geometry doesn't apply here.
+    """
+    metabolism = tables["egcf_metabolism"]
+    if metabolism is None or metabolism.is_empty():
+        _empty_state("metabolism")
+        return
+    placed = metabolism.drop_nulls("par_chamber_umol_m2_s")
+    if placed.is_empty():
+        st.info("No O2 flux overlaps the PAR record, so there's nothing to place on a light axis.")
+        return
+    pi_fit = tables["egcf_pi_fit"]
+    transmittance = pi_fit["chamber_par_transmittance"][0] if pi_fit is not None and not pi_fit.is_empty() else None
+    par_basis = "ambient PAR at the logger" if transmittance in (None, 1.0) else f"PAR × chamber transmittance {transmittance:g}"
+    st.caption(
+        f"Each point is one experiment's O2 flux against its mean {par_basis}. Hollow markers are excluded "
+        "fluxes (hover for the reason). Geometry, dark threshold and transmittance are fixed at processing time."
+    )
+
+    chambers = sorted(placed["chamber"].unique().to_list())
+    colors = chamber_color_map(chambers)
+    par_max = float(placed["par_chamber_umol_m2_s"].max())
+    x_label = "PAR (µmol photons m⁻² s⁻¹)"
+
+    fluxes = tables["egcf_fluxes"]
+    h_ion = None
+    if fluxes is not None and "par_mean_umol_m2_s" in fluxes.columns:
+        h_ion = (
+            fluxes.filter(pl.col("variable") == "h_ion")
+            .select("experiment_number", "chamber", pl.col("output_value").alias("h_ion_flux"))
+            .join(placed, on=["experiment_number", "chamber"], how="inner")
+        )
+        if h_ion.is_empty():
+            h_ion = None
+
+    rows = 2 if h_ion is not None else 1
+    titles = ["O2 flux (µmol m⁻² h⁻¹)"] + (["H⁺ flux (µmol m⁻² h⁻¹) — should oppose O2"] if h_ion is not None else [])
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, subplot_titles=titles, vertical_spacing=0.08)
+    for chamber in chambers:
+        for used in (True, False):
+            g = placed.filter((pl.col("chamber") == chamber) & (pl.col("used") == used))
+            if not g.is_empty():
+                fig.add_trace(_metabolism_scatter(g, "o2_flux_umol_m2_h", chamber, colors[chamber], used, True), row=1, col=1)
+            if h_ion is not None:
+                gh = h_ion.filter((pl.col("chamber") == chamber) & (pl.col("used") == used))
+                if not gh.is_empty():
+                    fig.add_trace(_metabolism_scatter(gh, "h_ion_flux", chamber, colors[chamber], used, False), row=2, col=1)
+    for trace in _pi_curve_traces(pi_fit, par_max, colors):
+        fig.add_trace(trace, row=1, col=1)
+    for row in range(1, rows + 1):
+        fig.add_hline(y=0, line={"color": _ZERO_LINE_COLOR, "width": 1}, row=row, col=1)
+    fig.update_xaxes(title_text=x_label, row=rows, col=1)
+    fig.update_layout(height=420 * rows, title="Metabolism vs light")
+    st.plotly_chart(fig, width="stretch")
+
+    if pi_fit is not None and not pi_fit.is_empty():
+        st.subheader("P–I fit (Jassby–Platt)")
+        st.caption(
+            "NCP = Pmax·tanh(α·I/Pmax) − R, per chamber, over used light and dark fluxes. "
+            "Fluxes in µmol O2 m⁻² h⁻¹; I and Ik in µmol photons m⁻² s⁻¹. R (dark mean) is the measured check on R (fit)."
+        )
+        st.dataframe(pi_fit, width="stretch", hide_index=True)
+
+    light = metabolism.filter(pl.col("used") & (pl.col("period") == "light"))
+    if not light.is_empty():
+        with st.expander("Light incubations: NCP and GPP"):
+            st.dataframe(
+                light.select(
+                    "experiment_number", "chamber", "experiment_start", "par_chamber_umol_m2_s", "ncp_umol_m2_h", "gpp_umol_m2_h", "r2"
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+
 def render_overview(tables: dict[str, pl.DataFrame | None]) -> None:
     with st.expander("Dataset overview"):
         for name, df in tables.items():
@@ -1292,13 +1492,17 @@ def main() -> None:
             start, end = render_time_range_control(bounds)
         plot_tables = filter_tables_to_range(tables, start, end)
 
-    status_tab, measurements_tab, experiment_tab = st.tabs(["Status", "Measurements", "Experiment Data"])
+    status_tab, measurements_tab, experiment_tab, metabolism_tab = st.tabs(
+        ["Status", "Measurements", "Experiment Data", "Metabolism"]
+    )
     with status_tab:
         render_status_tab(plot_tables, total_pressure_sensitivity)
     with measurements_tab:
         render_measurements_tab(plot_tables, partial_pressure_sensitivity)
     with experiment_tab:
         render_experiment_tab(tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2)
+    with metabolism_tab:
+        render_metabolism_tab(tables)
 
 
 if __name__ == "__main__":

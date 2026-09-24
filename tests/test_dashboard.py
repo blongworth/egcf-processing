@@ -7,6 +7,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from egcf_processing.combine import STATUS_SCHEMA, VALVE_SCHEMA
+from egcf_processing.metabolism import METABOLISM_SCHEMA, PI_FIT_SCHEMA
 from egcf_processing.par import PAR_SCHEMA
 from egcf_processing.dashboard import (
     active_chamber_spans,
@@ -1182,9 +1183,16 @@ def test_measurements_tab_renders_par_panel_on_shared_axis(tmp_path):
     _write_par(tmp_path)
 
     _at, spec, titles = _measurements_subplot_titles(tmp_path)
-    assert titles[-1] == "PAR (µmol photons m⁻² s⁻¹)"
-    par_trace = [d for d in spec["data"] if d["name"] == "par_umol_m2_s"][0]
-    assert spec["layout"][par_trace["xaxis"].replace("x", "xaxis")]["matches"] == "x"
+    assert titles[-3:] == [
+        "PAR (µmol photons m⁻² s⁻¹)",
+        "Daily light integral (mol photons m⁻² d⁻¹)",
+        "Daily max PAR (µmol photons m⁻² s⁻¹) — biofouling screen",
+    ]
+    for name in ("par_umol_m2_s", "daily light integral", "daily max PAR"):
+        trace = [d for d in spec["data"] if d["name"] == name][0]
+        assert spec["layout"][trace["xaxis"].replace("x", "xaxis")]["matches"] == "x"
+    # Two readings 10 s apart is a partial day: no trend line.
+    assert not [d for d in spec["data"] if d["name"].startswith("trend")]
 
 
 def test_measurements_tab_falls_back_to_raw_par_when_uncalibrated(tmp_path):
@@ -1193,3 +1201,74 @@ def test_measurements_tab_falls_back_to_raw_par_when_uncalibrated(tmp_path):
     at, _spec, titles = _measurements_subplot_titles(tmp_path)
     assert titles == ["PAR (raw counts, uncalibrated)"]
     assert any("No PAR calibration matched" in i.value for i in at.tabs[1].info)
+
+
+def _write_metabolism(tmp_path):
+    starts = [datetime(2026, 9, 19, 4 * i) for i in range(4)]
+    pl.DataFrame(
+        {
+            "experiment_number": [1, 1, 2, 2, 3, 3, 4, 4],
+            "chamber": ["C1", "C2"] * 4,
+            "experiment_start": [s for s in starts for _ in range(2)],
+            "par_mean_umol_m2_s": [6.5, 6.5, 500.0, 500.0, 1000.0, 1000.0, None, None],
+            "par_integrated_mol_m2": [0.07, 0.07, 5.4, 5.4, 10.8, 10.8, None, None],
+            "par_coverage": [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, None, None],
+            "par_chamber_umol_m2_s": [6.5, 6.5, 500.0, 500.0, 1000.0, 1000.0, None, None],
+            "o2_flux_umol_m2_h": [-200.0, -500.0, 1000.0, 2500.0, 1400.0, 3200.0, 10.0, 10.0],
+            "r2": [0.9, 0.9, 0.95, 0.95, None, 0.9, 0.5, 0.5],
+            "period": ["dark", "dark", "light", "light", "light", "light", None, None],
+            "used": [True, True, True, True, False, False, False, False],
+            "excluded_reason": [None, None, None, None, "PAR coverage below minimum", "PAR coverage below minimum", "no PAR", "no PAR"],
+            "ncp_umol_m2_h": [None, None, 1000.0, 2500.0, None, None, None, None],
+            "gpp_umol_m2_h": [None, None, 1200.0, 3000.0, None, None, None, None],
+        },
+        schema=METABOLISM_SCHEMA,
+    ).write_parquet(tmp_path / "egcf_metabolism.parquet")
+    pl.DataFrame(
+        [
+            {**{k: None for k in PI_FIT_SCHEMA}, "chamber": "C1", "chamber_par_transmittance": 1.0, "n_points": 4,
+             "pmax_umol_m2_h": 1500.0, "alpha_umol_m2_h_per_par": 5.0, "r_fit_umol_m2_h": 200.0,
+             "ik_umol_m2_s": 300.0, "converged": True},
+            {**{k: None for k in PI_FIT_SCHEMA}, "chamber": "C2", "chamber_par_transmittance": 1.0, "n_points": 2,
+             "converged": False},
+        ],
+        schema=PI_FIT_SCHEMA,
+    ).write_parquet(tmp_path / "egcf_pi_fit.parquet")
+
+
+def _metabolism_tab(tmp_path):
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+    return at.tabs[3]
+
+
+def test_metabolism_tab_plots_o2_vs_par_with_fit_and_h_ion_panel(tmp_path):
+    _write_metabolism(tmp_path)
+    pl.DataFrame(
+        {
+            "experiment_number": [1, 2],
+            "chamber": ["C1", "C1"],
+            "variable": ["h_ion", "h_ion"],
+            "output_value": [0.02, -0.03],
+            "par_mean_umol_m2_s": [6.5, 500.0],
+        }
+    ).write_parquet(tmp_path / "egcf_fluxes.parquet")
+
+    tab = _metabolism_tab(tmp_path)
+    spec = json.loads(tab.get("plotly_chart")[0].proto.spec)
+    titles = [a["text"] for a in spec["layout"]["annotations"]]
+    assert titles == ["O2 flux (µmol m⁻² h⁻¹)", "H⁺ flux (µmol m⁻² h⁻¹) — should oppose O2"]
+    names = [d["name"] for d in spec["data"]]
+    # Rows with no PAR aren't placed; excluded-but-placed rows are hollow.
+    assert names.count("C1") == 2 and "C1 excluded" in names
+    # Only the converged chamber gets a curve.
+    assert [n for n in names if "fit" in n] == ["C1 fit (Ik=300)"]
+    assert len(tab.dataframe) == 2
+
+
+def test_metabolism_tab_empty_state_without_outputs(tmp_path):
+    _write_par(tmp_path)
+    tab = _metabolism_tab(tmp_path)
+    assert "No metabolism data" in tab.info[0].value
