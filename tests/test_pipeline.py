@@ -243,6 +243,10 @@ def test_end_to_end_pipeline_writes_par_and_averages_it_onto_cycles(tmp_path):
     fluxes = pl.read_parquet(out_dir / "egcf_fluxes.parquet")
     assert {"par_mean_umol_m2_s", "par_integrated_mol_m2", "par_coverage"} <= set(fluxes.columns)
 
+    # No scalup in FILE_1, so no O2 flux: metabolism and the P-I fit are written empty, with schema.
+    assert pl.read_parquet(out_dir / "egcf_metabolism.parquet").columns[-2:] == ["ncp_umol_m2_h", "gpp_umol_m2_h"]
+    assert "pmax_umol_m2_h" in pl.read_parquet(out_dir / "egcf_pi_fit.parquet").columns
+
 
 def test_end_to_end_pipeline_without_par_writes_empty_typed_par(tmp_path):
     raw_dir = tmp_path / "raw"

@@ -6,6 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 from egcf_processing.pipeline import (
+    DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
+    DEFAULT_METABOLISM_MIN_R2,
+    DEFAULT_MIN_PAR_COVERAGE,
     DEFAULT_N2_AR_SENSITIVITY_RATIO,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_PAR_CALIBRATIONS_PATH,
@@ -98,6 +101,24 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Drop PAR rows at or after this ISO datetime (after the time offset), e.g. recovery",
     )
+    parser.add_argument(
+        "--dark-par-threshold",
+        type=float,
+        default=DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
+        help="Experiments with mean PAR below this (umol photons m^-2 s^-1) are dark (respiration)",
+    )
+    parser.add_argument(
+        "--min-par-coverage",
+        type=float,
+        default=DEFAULT_MIN_PAR_COVERAGE,
+        help="Minimum fraction of an experiment covered by PAR readings for its O2 flux to be used",
+    )
+    parser.add_argument(
+        "--metabolism-min-r2",
+        type=float,
+        default=DEFAULT_METABOLISM_MIN_R2,
+        help="Minimum O2 flux fit r2 to use it in metabolism/P-I (default 0: near-zero fluxes have low r2)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -117,6 +138,9 @@ def main(argv: list[str] | None = None) -> None:
         par_time_offset_h=args.par_time_offset_h,
         par_start=args.par_start,
         par_end=args.par_end,
+        dark_par_threshold_umol_m2_s=args.dark_par_threshold,
+        min_par_coverage=args.min_par_coverage,
+        metabolism_min_r2=args.metabolism_min_r2,
     )
 
 

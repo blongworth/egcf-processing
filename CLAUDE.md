@@ -24,7 +24,8 @@ uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
 uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
     [--settle-offset-s 60] [--format parquet|csv] \
-    [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>]
+    [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>] \
+    [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0]
 uv run streamlit run dashboard.py  # launch the read-only dashboard
 ```
 
@@ -33,7 +34,7 @@ non-obvious, explicit polars schemas, functions over classes.
 
 `data/` is gitignored — raw logs and processed output live there and are never committed.
 
-## Architecture: four layers, one shared aggregator
+## Architecture: five layers, one shared aggregator
 
 ```
 src/egcf_processing/
@@ -47,6 +48,7 @@ src/egcf_processing/
   cycles.py      # Layer C window boundaries: chamber-cycle + experiment numbering
   aggregate.py   # shared windowed aggregation used by both Layer B and C
   flux.py        # Layer D: benthic vertical flux from Layer C's cycle averages
+  metabolism.py  # Layer E: light/dark O2 metabolism + per-chamber P-I curve fit (scipy)
   pipeline.py    # orchestrates the above; run(raw_dir, out_dir, chamber_volume_l, chamber_area_m2, ...)
   cli.py         # argparse entry point
   dashboard.py   # Streamlit app (read-only viewer over data/processed)
@@ -66,7 +68,10 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
 4. **Layer D (`egcf_fluxes`)** — one row per `(experiment_number, chamber, variable)`: benthic vertical
    flux (`dC/dt * V/A`, in µmol m⁻² h⁻¹) fit from Layer C's cycle averages. Chamber volume and area
    are required inputs with no default. Each flux row also carries the mean and integrated PAR over
-   its whole experiment (`par_mean_umol_m2_s`, `par_integrated_mol_m2`, `par_coverage`). See `AGENTS.md` for the per-variable formulas and caveats.
+   its whole experiment (`par_mean_umol_m2_s`, `par_integrated_mol_m2`, `par_coverage`).
+5. **Layer E (`egcf_metabolism`, `egcf_pi_fit`)** — each O2 flux classified light/dark by mean PAR,
+   with R, NCP, and GPP, plus a per-chamber Jassby–Platt P–I fit (Pmax, α, R, Ik). Excluded
+   fluxes are kept with an `excluded_reason`. See `AGENTS.md` for thresholds and units. See `AGENTS.md` for the per-variable formulas and caveats.
 
 Layers B and C share `aggregate.aggregate_onto_windows()` — they differ only in which `windows`
 table they're aggregated onto. If you need a third grain, add another window-boundary function and

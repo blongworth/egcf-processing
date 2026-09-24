@@ -28,7 +28,8 @@ src/egcf_processing/
   rga_scans.py     # Layer B window boundaries: RGA scan-cycle detection
   cycles.py        # Layer C window boundaries: chamber-cycle + experiment numbering
   aggregate.py     # shared windowed aggregation used by both Layer B and C
-  flux.py          # Layer D: benthic vertical flux from Layer C's cycle averages
+  flux.py          # Layer D: benthic vertical flux from Layer C's cycle averages (+ per-experiment PAR)
+  metabolism.py    # Layer E: light/dark O2 metabolism (R, NCP, GPP) + per-chamber Jassby-Platt P-I fit
   pipeline.py      # orchestrates the above; run(raw_dir, out_dir, chamber_volume_l, chamber_area_m2, ...)
   cli.py           # argparse entry point
 main.py            # thin shim -> egcf_processing.cli.main
@@ -105,7 +106,7 @@ occurs" gotcha below is specific to the SD-card recovery data; `data/raw/surface
 has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total_pressure_current`/
 `pump_rpm` do get populated when processing surface data, unlike the gems-only case described below.
 
-## Pipeline model (four layers)
+## Pipeline model (five layers)
 
 1. **Layer A (raw combined)** — every raw file (gems + surface, see above) parsed and concatenated by
    tag into `status.parquet` (`!:`), `rga.parquet` (`R:`), `scalup.parquet` (`P:`), `valve.parquet` (`V:`),
@@ -132,6 +133,9 @@ has thousands of real `!:` lines, so `turbo_speed_hz`/`turbo_power_w`/`raw_total
 4. **Layer D (`egcf_fluxes`)** — one row per `(experiment_number, chamber, variable)`: the benthic
    vertical flux over one incubation, from the OLS slope of Layer C's cycle averages. See
    "Flux calculation" below.
+5. **Layer E (`egcf_metabolism`, `egcf_pi_fit`)** — Layer D's O2 fluxes classified light/dark by
+   experiment-mean PAR, with R/NCP/GPP, plus a per-chamber P–I curve fit. See "Layer E" under the
+   PAR section.
 
 Layers B and C share one aggregation function, `aggregate.aggregate_onto_windows()` — they differ
 only in which `windows` table (window_start, window_end, chamber, experiment_number, elapsed_time)
@@ -322,20 +326,51 @@ deployment the spans are 3 h.
 `compute_fluxes()` itself is unchanged, so the dashboard's live flux table doesn't carry these
 columns. Only the written `egcf_fluxes` does.
 
+**Layer E: metabolism and P–I (`metabolism.py`).** This layer reads Layer D's `oxygen` rows and
+writes two tables.
+
+`egcf_metabolism` has one row per O2 flux:
+- `period` is `dark` when `par_mean_umol_m2_s` is below `--dark-par-threshold`, and `light`
+  otherwise. The default threshold is 20. Night reads the 6.45 calibration intercept, and
+  dusk/dawn experiments land a little above it.
+- Excluded rows are **kept**, with `used = false` and an `excluded_reason`: `no PAR`,
+  `PAR coverage below minimum` (`--min-par-coverage`, default 0.9), or `r2 below minimum`.
+- R is −mean(used dark O2 flux) per chamber, so it's positive for uptake. It is **not** forced
+  positive.
+- On used light rows, `ncp_umol_m2_h` is the O2 flux and `gpp_umol_m2_h` = NCP + R. This assumes
+  light respiration equals dark respiration.
+
+`egcf_pi_fit` has one row per chamber. It holds a Jassby & Platt (1976) fit,
+`NCP = Pmax·tanh(α·I/Pmax) − R`, over the used light and dark points together, done with
+`scipy.optimize.curve_fit`. Pmax and α are bounded positive and R is unbounded. Columns: Pmax, α,
+fitted R, each with a standard error from the covariance; Ik = Pmax/α; `fit_r2`; the dark-mean R
+for comparison; and point counts. A chamber with fewer than 4 used points, or no light points,
+gets a WARNING and `converged = false` with null parameters.
+
+Units: I (PAR) is per **second** and the fluxes are per **hour**. So α is
+`alpha_umol_m2_h_per_par`, meaning (µmol O2 m⁻² h⁻¹) per (µmol photons m⁻² s⁻¹), and Ik is
+`ik_umol_m2_s`, in PAR units.
+
+**No r2 filter by default** (`--metabolism-min-r2 0`). A flux near zero, such as one at the
+compensation irradiance, fits a flat line whose r2 is low by construction. Filtering on r2 would
+remove exactly the points that pin the curve's low end.
+
+First real result, 2026-09-18 to 09-21, 18 points per chamber, 9 light and 9 dark:
+- C1: Pmax 1560 ± 265, α 4.1 ± 1.6, R 169 ± 122 against a dark-mean R of 183, Ik 380, r² 0.74.
+- C2: Pmax 3477 ± 523, α 11.8 ± 4.1, R 573 ± 265 against a dark-mean R of 531, Ik 296, r² 0.77.
+
+That's with placeholder geometry (4 L / 0.06 m²), so the magnitudes scale with the real V/A. The
+fitted R agrees with the measured dark-mean R within its standard error, which is the sanity
+check to repeat on each new deployment.
+
 #### Suggested next steps (not implemented)
 
-1. **`metabolism.py` (Layer E, `egcf_metabolism`)**: classify each O2 flux as light or dark from a
-   PAR threshold. Dark gives R, light gives NCP, and GPP = NCP + |R|. Fit a Jassby–Platt P–I curve,
-   `NCP = Pmax·tanh(α·I/Pmax) − R`, per chamber across experiments, reporting Pmax, α,
-   Ik = Pmax/α, and R. `scipy.optimize.curve_fit` would be a new dependency to approve; a
-   pure-numpy grid fit is the alternative. Daily integrated metabolism was considered and left out
-   of the initial scope.
-2. **Dashboard "Metabolism" section or tab**: O2 flux vs mean PAR scatter, colored by chamber, with
-   the fitted curve overlaid. Add H⁺ flux vs PAR as a cross-check.
-3. **QC**: daily clear-sky noon-max PAR trend (biofouling), daily light integral
+1. **Dashboard "Metabolism" section or tab**: O2 flux vs mean PAR scatter from `egcf_metabolism`,
+   colored by chamber, with the `egcf_pi_fit` curve overlaid. Add H⁺ flux vs PAR as a cross-check.
+2. **QC**: daily clear-sky noon-max PAR trend (biofouling), daily light integral
    (mol photons m⁻² d⁻¹) on the Measurements tab, and a chamber-transmittance factor once it's
    measured.
-4. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
+3. **Fill in `par_calibrations.csv`**: `interval_s` and `cal_date` for the CRISPEE calibration, and
    the serials for sensors 2 and 3.
 
 ## Data format gotchas (confirmed against real files, not just the README)

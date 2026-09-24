@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from egcf_processing import aggregate, combine, cycles, discovery, events, flux, par, reader, rga_scans
+from egcf_processing import aggregate, combine, cycles, discovery, events, flux, metabolism, par, reader, rga_scans
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,9 @@ DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = aggregate.DEFAULT_TOTAL_PRESSURE
 DEFAULT_N2_AR_SENSITIVITY_RATIO = flux.DEFAULT_N2_AR_SENSITIVITY_RATIO
 DEFAULT_PAR_CALIBRATIONS_PATH = par.DEFAULT_CALIBRATIONS_PATH
 DEFAULT_PAR_TIME_OFFSET_H = 0.0
+DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S = metabolism.DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S
+DEFAULT_MIN_PAR_COVERAGE = metabolism.DEFAULT_MIN_PAR_COVERAGE
+DEFAULT_METABOLISM_MIN_R2 = metabolism.DEFAULT_MIN_R2
 
 
 def run(
@@ -34,6 +37,9 @@ def run(
     par_time_offset_h: float = DEFAULT_PAR_TIME_OFFSET_H,
     par_start: datetime | None = None,
     par_end: datetime | None = None,
+    dark_par_threshold_umol_m2_s: float = DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
+    min_par_coverage: float = DEFAULT_MIN_PAR_COVERAGE,
+    metabolism_min_r2: float = DEFAULT_METABOLISM_MIN_R2,
 ) -> dict:
     files = discovery.find_all_files(raw_dir)
     logger.info("found %d gems_*.txt/surface_*_lander.log file(s) under %s", len(files), raw_dir)
@@ -98,12 +104,19 @@ def run(
             "measure it with flux.n2_ar_sensitivity_from_standard() against an air-equilibrated standard"
         )
 
+    layer_e = metabolism.classify_o2_fluxes(layer_d, dark_par_threshold_umol_m2_s, min_par_coverage, metabolism_min_r2)
+    pi_fit = metabolism.fit_pi_curves(layer_e)
+
     scans_path = combine.write_df(layer_b, out_dir, "egcf_rga_scans", output_format)
     cycles_path = combine.write_df(layer_c, out_dir, "egcf_chamber_cycles", output_format)
     fluxes_path = combine.write_df(layer_d, out_dir, "egcf_fluxes", output_format)
     logger.info("wrote rga_scans (%d rows) -> %s", layer_b.height, scans_path)
     logger.info("wrote chamber_cycles (%d rows) -> %s", layer_c.height, cycles_path)
     logger.info("wrote fluxes (%d rows) -> %s", layer_d.height, fluxes_path)
+    metabolism_path = combine.write_df(layer_e, out_dir, "egcf_metabolism", output_format)
+    pi_fit_path = combine.write_df(pi_fit, out_dir, "egcf_pi_fit", output_format)
+    logger.info("wrote metabolism (%d rows) -> %s", layer_e.height, metabolism_path)
+    logger.info("wrote pi_fit (%d rows) -> %s", pi_fit.height, pi_fit_path)
 
     return {
         "n_files": len(files),
@@ -114,4 +127,6 @@ def run(
         "layer_b_rows": layer_b.height,
         "layer_c_rows": layer_c.height,
         "layer_d_rows": layer_d.height,
+        "layer_e_rows": layer_e.height,
+        "pi_fit_rows": pi_fit.height,
     }
