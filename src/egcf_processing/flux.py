@@ -25,7 +25,9 @@ import math
 
 import polars as pl
 
-O2_UMOL_PER_MG = 1000 / 32  # mg/L -> umol/L, O2 molar mass 32 g/mol
+O2_UMOL_PER_MG = (
+    1 / 1000 * 1 / 32 * 1e6
+)  # mg/L -> umol/L; mg -> g, g -> mol, mol -> umol; O2 molar mass 32 g/mol
 H_ION_UMOL_PER_MOL = 1e6  # mol/L -> umol/L
 
 MIN_PER_HOUR = 60.0
@@ -104,7 +106,14 @@ _SOLUBILITY_COEFFS = {
 # instead of a fixed ~1.025 kg/L because that approximation is ~1.4% off at
 # S=15 and ~2.6% off in fresh water -- a real error in an estuarine setting,
 # where it feeds straight through to N2 flux magnitude.
-_EOS80_PURE = (999.842594, 6.793952e-2, -9.095290e-3, 1.001685e-4, -1.120083e-6, 6.536332e-9)
+_EOS80_PURE = (
+    999.842594,
+    6.793952e-2,
+    -9.095290e-3,
+    1.001685e-4,
+    -1.120083e-6,
+    6.536332e-9,
+)
 _EOS80_A = (8.24493e-1, -4.0899e-3, 7.6438e-5, -8.2467e-7, 5.3875e-9)
 _EOS80_B = (-5.72466e-3, 1.0227e-4, -1.6546e-6)
 _EOS80_C = 4.8314e-4
@@ -199,7 +208,9 @@ def seawater_density_kg_per_l(temp_degc: float, sal_psu: float) -> float:
     return (rho_w + coef_a * s + coef_b * s**1.5 + _EOS80_C * s**2) / 1000
 
 
-def n2_ar_sensitivity_from_standard(raw_ratio: float, temp_degc: float, sal_psu: float) -> float:
+def n2_ar_sensitivity_from_standard(
+    raw_ratio: float, temp_degc: float, sal_psu: float
+) -> float:
     """Instrument mass-28/mass-40 sensitivity ratio from an air-equilibrated standard.
 
     Run water equilibrated with air at a known, stable temperature and
@@ -207,7 +218,9 @@ def n2_ar_sensitivity_from_standard(raw_ratio: float, temp_degc: float, sal_psu:
     returns the factor to divide subsequent raw ratios by so they become true
     molar N2/Ar ratios. Pass the result as ``n2_ar_sensitivity_ratio``.
     """
-    true_ratio = gas_solubility_umol_kg("N2", temp_degc, sal_psu) / gas_solubility_umol_kg("Ar", temp_degc, sal_psu)
+    true_ratio = gas_solubility_umol_kg(
+        "N2", temp_degc, sal_psu
+    ) / gas_solubility_umol_kg("Ar", temp_degc, sal_psu)
     return raw_ratio / true_ratio
 
 
@@ -250,7 +263,11 @@ def concentration_series(cycles: pl.DataFrame, value_col: str) -> pl.DataFrame:
                 "n": fit["n"],
             }
         )
-    return pl.DataFrame(rows, schema=_SERIES_SCHEMA).sort("experiment_start") if rows else pl.DataFrame(schema=_SERIES_SCHEMA)
+    return (
+        pl.DataFrame(rows, schema=_SERIES_SCHEMA).sort("experiment_start")
+        if rows
+        else pl.DataFrame(schema=_SERIES_SCHEMA)
+    )
 
 
 def _flux_rows(
@@ -269,7 +286,11 @@ def _flux_rows(
             "slope_native_per_min": row["slope"],
             "r2": row["r2"],
             "n_points": row["n"],
-            "output_value": row["slope"] * native_to_umol_per_l * chamber_volume_l / chamber_area_m2 * MIN_PER_HOUR,
+            "output_value": row["slope"]
+            * native_to_umol_per_l
+            * chamber_volume_l
+            / chamber_area_m2
+            * MIN_PER_HOUR,
             "output_unit": "umol m-2 h-1",
         }
         for row in series.iter_rows(named=True)
@@ -293,7 +314,9 @@ def _rate_rows(series: pl.DataFrame, variable: str, output_unit: str) -> list[di
     ]
 
 
-def _with_n2_dissolved_umol_l(cycles: pl.DataFrame, n2_ar_sensitivity_ratio: float) -> pl.DataFrame:
+def _with_n2_dissolved_umol_l(
+    cycles: pl.DataFrame, n2_ar_sensitivity_ratio: float
+) -> pl.DataFrame:
     """Add dissolved [N2] (umol/L) from the raw mass-28/mass-40 ion-current ratio.
 
     [N2] = (I28/I40 / k) * Ar_solubility(T0,S0) * density(T0,S0), where k is
@@ -314,17 +337,26 @@ def _with_n2_dissolved_umol_l(cycles: pl.DataFrame, n2_ar_sensitivity_ratio: flo
         cycles.drop_nulls(["temp_degC", "sal_PSU"])
         .sort("timestamp")
         .group_by(["experiment_number", "chamber"])
-        .agg(pl.col("temp_degC").first().alias("_t0"), pl.col("sal_PSU").first().alias("_s0"))
+        .agg(
+            pl.col("temp_degC").first().alias("_t0"),
+            pl.col("sal_PSU").first().alias("_s0"),
+        )
     )
     joined = cycles.join(anchor, on=["experiment_number", "chamber"], how="left")
     ratios = (joined["mass_28_avg"] / joined["mass_40_avg"]).to_list()
     values = [
-        (ratio / n2_ar_sensitivity_ratio) * ar_solubility_umol_kg(t0, s0) * seawater_density_kg_per_l(t0, s0)
+        (ratio / n2_ar_sensitivity_ratio)
+        * ar_solubility_umol_kg(t0, s0)
+        * seawater_density_kg_per_l(t0, s0)
         if ratio is not None and t0 is not None and s0 is not None
         else None
-        for ratio, t0, s0 in zip(ratios, joined["_t0"].to_list(), joined["_s0"].to_list())
+        for ratio, t0, s0 in zip(
+            ratios, joined["_t0"].to_list(), joined["_s0"].to_list()
+        )
     ]
-    return joined.with_columns(pl.Series("_n2_umol_l", values, dtype=pl.Float64)).drop("_t0", "_s0")
+    return joined.with_columns(pl.Series("_n2_umol_l", values, dtype=pl.Float64)).drop(
+        "_t0", "_s0"
+    )
 
 
 def compute_fluxes(
@@ -354,17 +386,27 @@ def compute_fluxes(
 
     if "oxygen_mgL" in cycles.columns:
         series = concentration_series(cycles, "oxygen_mgL")
-        rows += _flux_rows(series, "oxygen", O2_UMOL_PER_MG, chamber_volume_l, chamber_area_m2)
+        rows += _flux_rows(
+            series, "oxygen", O2_UMOL_PER_MG, chamber_volume_l, chamber_area_m2
+        )
 
     if "pH" in cycles.columns:
-        h_ion = cycles.with_columns(pl.lit(10.0).pow(-pl.col("pH")).alias("_h_ion_mol_l"))
+        h_ion = cycles.with_columns(
+            pl.lit(10.0).pow(-pl.col("pH")).alias("_h_ion_mol_l")
+        )
         series = concentration_series(h_ion, "_h_ion_mol_l")
-        rows += _flux_rows(series, "h_ion", H_ION_UMOL_PER_MOL, chamber_volume_l, chamber_area_m2)
+        rows += _flux_rows(
+            series, "h_ion", H_ION_UMOL_PER_MOL, chamber_volume_l, chamber_area_m2
+        )
 
     if {"mass_28_avg", "mass_40_avg", "temp_degC", "sal_PSU"} <= set(cycles.columns):
-        n2 = _with_n2_dissolved_umol_l(cycles.filter(pl.col("mass_40_avg") != 0), n2_ar_sensitivity_ratio)
+        n2 = _with_n2_dissolved_umol_l(
+            cycles.filter(pl.col("mass_40_avg") != 0), n2_ar_sensitivity_ratio
+        )
         series = concentration_series(n2, "_n2_umol_l")
-        rows += _flux_rows(series, "n2_denitrification", 1.0, chamber_volume_l, chamber_area_m2)
+        rows += _flux_rows(
+            series, "n2_denitrification", 1.0, chamber_volume_l, chamber_area_m2
+        )
 
     if "temp_degC" in cycles.columns:
         series = concentration_series(cycles, "temp_degC")
@@ -372,7 +414,9 @@ def compute_fluxes(
 
     if not rows:
         return pl.DataFrame(schema=_FLUX_SCHEMA)
-    return pl.DataFrame(rows, schema=_FLUX_SCHEMA).sort(["experiment_start", "chamber", "variable"])
+    return pl.DataFrame(rows, schema=_FLUX_SCHEMA).sort(
+        ["experiment_start", "chamber", "variable"]
+    )
 
 
 def experiment_par(par: pl.DataFrame, spans: pl.DataFrame) -> pl.DataFrame:
@@ -391,17 +435,37 @@ def experiment_par(par: pl.DataFrame, spans: pl.DataFrame) -> pl.DataFrame:
     readings = (
         par.drop_nulls("par_umol_m2_s")
         .sort("ts")
-        .join_asof(spans.sort("experiment_start"), left_on="ts", right_on="experiment_start", strategy="backward")
-        .filter(pl.col("experiment_start").is_not_null() & (pl.col("ts") < pl.col("experiment_end")))
+        .join_asof(
+            spans.sort("experiment_start"),
+            left_on="ts",
+            right_on="experiment_start",
+            strategy="backward",
+        )
+        .filter(
+            pl.col("experiment_start").is_not_null()
+            & (pl.col("ts") < pl.col("experiment_end"))
+        )
     )
-    span_s = (pl.col("experiment_end") - pl.col("experiment_start")).first().dt.total_microseconds() / 1_000_000
-    return readings.group_by("experiment_number").agg(
-        pl.col("par_umol_m2_s").mean().alias("par_mean_umol_m2_s"),
-        ((pl.col("par_umol_m2_s") * pl.col("interval_s")).sum() / 1e6).alias("par_integrated_mol_m2"),
-        (pl.col("interval_s").sum() / span_s).clip(upper_bound=1.0).alias("par_coverage"),
-    ).cast(_EXPERIMENT_PAR_SCHEMA)
+    span_s = (
+        pl.col("experiment_end") - pl.col("experiment_start")
+    ).first().dt.total_microseconds() / 1_000_000
+    return (
+        readings.group_by("experiment_number")
+        .agg(
+            pl.col("par_umol_m2_s").mean().alias("par_mean_umol_m2_s"),
+            ((pl.col("par_umol_m2_s") * pl.col("interval_s")).sum() / 1e6).alias(
+                "par_integrated_mol_m2"
+            ),
+            (pl.col("interval_s").sum() / span_s)
+            .clip(upper_bound=1.0)
+            .alias("par_coverage"),
+        )
+        .cast(_EXPERIMENT_PAR_SCHEMA)
+    )
 
 
-def attach_experiment_par(fluxes: pl.DataFrame, par: pl.DataFrame, spans: pl.DataFrame) -> pl.DataFrame:
+def attach_experiment_par(
+    fluxes: pl.DataFrame, par: pl.DataFrame, spans: pl.DataFrame
+) -> pl.DataFrame:
     """Join experiment_par onto every flux row (null columns where there's no PAR)."""
     return fluxes.join(experiment_par(par, spans), on="experiment_number", how="left")
