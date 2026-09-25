@@ -26,7 +26,7 @@ from egcf_processing.aggregate import (
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
 from egcf_processing.cycles import chamber_cycle_windows
 from egcf_processing.flux import compute_fluxes, linear_fit
-from egcf_processing.metabolism import jassby_platt
+from egcf_processing.metabolism import fit_pi_curves, jassby_platt
 from egcf_processing.par import DEFAULT_MIN_DAY_COVERAGE, daily_max_trend, daily_par
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
 
@@ -141,6 +141,7 @@ TIME_RANGE_PRESETS: dict[str, timedelta | None] = {
 }
 
 CUSTOM_TIME_RANGE = "Custom"
+DEFAULT_TIME_RANGE_PRESET = "Last 7 days"
 
 _FINE_STEP = timedelta(minutes=1)
 
@@ -155,6 +156,20 @@ def preset_time_range(preset: str, lo: datetime, hi: datetime) -> tuple[datetime
     if window is None:
         return lo, hi
     return max(lo, hi - window), hi
+
+
+def experiments_in_range(
+    start_by_exp: dict[int, datetime], time_range: tuple[datetime, datetime] | None
+) -> list[int]:
+    """Experiments whose start falls in time_range (every experiment when it's None), ascending.
+
+    Filtering on the start, not on the raw rows, keeps each incubation whole
+    and its experiment_number the same as in the pipeline output.
+    """
+    if time_range is None:
+        return sorted(start_by_exp)
+    start, end = time_range
+    return sorted(e for e, s in start_by_exp.items() if start <= s <= end)
 
 
 def date_range_bounds(dates, lo: datetime, hi: datetime) -> tuple[datetime, datetime]:
@@ -193,8 +208,11 @@ def render_time_range_control(bounds: tuple[datetime, datetime]) -> tuple[dateti
     """
     lo, hi = bounds
     st.header("Time range")
-    st.caption("Applies to the Status and Measurements tabs; the Experiment Data tab has its own selector.")
-    preset = st.selectbox("Preset", [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE], key="time_range_preset")
+    st.caption("Applies to every tab. Experiment Data and Metabolism keep the experiments that start in the range.")
+    options = [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE]
+    preset = st.selectbox(
+        "Preset", options, index=options.index(DEFAULT_TIME_RANGE_PRESET), key="time_range_preset"
+    )
 
     if preset != CUSTOM_TIME_RANGE:
         start, end = preset_time_range(preset, lo, hi)
@@ -849,6 +867,7 @@ def _render_experiment_full_data(
     status: pl.DataFrame | None,
     valve: pl.DataFrame,
     total_pressure_sensitivity: float,
+    time_range: tuple[datetime, datetime] | None = None,
 ) -> None:
     windows, _ = chamber_cycle_windows(valve, settle_offset_s=0.0)
     if windows.is_empty():
@@ -856,7 +875,10 @@ def _render_experiment_full_data(
         return
 
     start_by_exp = experiment_start_times(windows, "window_start")
-    experiments = sorted(windows["experiment_number"].unique().to_list())
+    experiments = experiments_in_range(start_by_exp, time_range)
+    if not experiments:
+        st.info("No experiment starts in the selected time range.")
+        return
     experiment = st.selectbox(
         "Experiment",
         [str(e) for e in experiments],
@@ -960,6 +982,7 @@ def _render_experiment_cycle_averages(
     total_pressure_sensitivity: float,
     chamber_volume_l: float,
     chamber_area_m2: float,
+    time_range: tuple[datetime, datetime] | None = None,
 ) -> None:
     settle_offset_s = st.slider(
         "Settling time after valve switch (s)",
@@ -995,7 +1018,11 @@ def _render_experiment_cycle_averages(
     start_by_exp = {
         e: s - timedelta(seconds=settle_offset_s) for e, s in experiment_start_times(with_experiment, "timestamp").items()
     }
-    experiments = sorted(with_experiment["experiment_number"].unique().to_list())
+    experiments = experiments_in_range(start_by_exp, time_range)
+    if not experiments:
+        st.info("No experiment starts in the selected time range.")
+        return
+    with_experiment = with_experiment.filter(pl.col("experiment_number").is_in(experiments))
     experiment = st.selectbox(
         "Experiment",
         [str(e) for e in experiments],
@@ -1296,6 +1323,7 @@ def render_experiment_tab(
     total_pressure_sensitivity: float,
     chamber_volume_l: float = 0.0,
     chamber_area_m2: float = 0.0,
+    time_range: tuple[datetime, datetime] | None = None,
 ) -> None:
     rga = tables["rga"]
     scalup = tables["scalup"]
@@ -1309,10 +1337,10 @@ def render_experiment_tab(
     grain = st.radio("Grain", ["Full data", "Cycle averages"], horizontal=True, key="experiment_grain")
 
     if grain == "Full data":
-        _render_experiment_full_data(rga, scalup, status, valve, total_pressure_sensitivity)
+        _render_experiment_full_data(rga, scalup, status, valve, total_pressure_sensitivity, time_range)
     else:
         _render_experiment_cycle_averages(
-            rga, scalup, status, valve, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2
+            rga, scalup, status, valve, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2, time_range
         )
 
 
@@ -1359,28 +1387,44 @@ def _metabolism_scatter(df: pl.DataFrame, y_col: str, chamber: str, color: str, 
     )
 
 
-def render_metabolism_tab(tables: dict[str, pl.DataFrame | None]) -> None:
+def render_metabolism_tab(
+    tables: dict[str, pl.DataFrame | None], time_range: tuple[datetime, datetime] | None = None
+) -> None:
     """O2 (and H+) flux against experiment-mean PAR, with the per-chamber P-I fit.
 
     Reads the pipeline's egcf_metabolism / egcf_pi_fit / egcf_fluxes outputs
     rather than recomputing, so the chamber geometry, dark threshold and
     transmittance are whatever the pipeline was run with -- unlike the
     Experiment tab's live flux, the sidebar geometry doesn't apply here.
+    The one exception: when the time range drops some experiments, the P-I
+    curve is refit over the ones left, so it describes the points shown.
+    R in the GPP column stays the pipeline's whole-deployment dark mean.
     """
     metabolism = tables["egcf_metabolism"]
     if metabolism is None or metabolism.is_empty():
         _empty_state("metabolism")
         return
+    pi_fit = tables["egcf_pi_fit"]
+    transmittance = pi_fit["chamber_par_transmittance"][0] if pi_fit is not None and not pi_fit.is_empty() else None
+    refit = False
+    if time_range is not None:
+        in_range = metabolism.filter(pl.col("experiment_start").is_between(*time_range))
+        if in_range.is_empty():
+            st.info("No experiment starts in the selected time range.")
+            return
+        refit = in_range.height < metabolism.height and transmittance is not None
+        metabolism = in_range
+        if refit:
+            pi_fit = fit_pi_curves(metabolism, transmittance)
     placed = metabolism.drop_nulls("par_chamber_umol_m2_s")
     if placed.is_empty():
         st.info("No O2 flux overlaps the PAR record, so there's nothing to place on a light axis.")
         return
-    pi_fit = tables["egcf_pi_fit"]
-    transmittance = pi_fit["chamber_par_transmittance"][0] if pi_fit is not None and not pi_fit.is_empty() else None
     par_basis = "ambient PAR at the logger" if transmittance in (None, 1.0) else f"PAR × chamber transmittance {transmittance:g}"
     st.caption(
         f"Each point is one experiment's O2 flux against its mean {par_basis}. Hollow markers are excluded "
         "fluxes (hover for the reason). Geometry, dark threshold and transmittance are fixed at processing time."
+        + (" The P–I fit is refit over the experiments in the selected time range." if refit else "")
     )
 
     chambers = sorted(placed["chamber"].unique().to_list())
@@ -1486,11 +1530,12 @@ def main() -> None:
     render_overview(tables)
 
     plot_tables = tables
+    time_range = None
     bounds = tables_time_bounds(tables)
     if bounds is not None and bounds[0] < bounds[1]:
         with time_range_slot:
-            start, end = render_time_range_control(bounds)
-        plot_tables = filter_tables_to_range(tables, start, end)
+            time_range = render_time_range_control(bounds)
+        plot_tables = filter_tables_to_range(tables, *time_range)
 
     status_tab, measurements_tab, experiment_tab, metabolism_tab = st.tabs(
         ["Status", "Measurements", "Experiment Data", "Metabolism"]
@@ -1500,9 +1545,9 @@ def main() -> None:
     with measurements_tab:
         render_measurements_tab(plot_tables, partial_pressure_sensitivity)
     with experiment_tab:
-        render_experiment_tab(tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2)
+        render_experiment_tab(tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2, time_range)
     with metabolism_tab:
-        render_metabolism_tab(tables)
+        render_metabolism_tab(tables, time_range)
 
 
 if __name__ == "__main__":

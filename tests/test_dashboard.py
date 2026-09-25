@@ -21,6 +21,7 @@ from egcf_processing.dashboard import (
     chamber_color_map,
     discover_masses,
     experiment_rates,
+    experiments_in_range,
     experiment_start_times,
     flux_variable_units,
     linear_fit,
@@ -1064,6 +1065,40 @@ def test_align_slider_bounds_keeps_at_least_one_step():
     assert align_slider_bounds(lo, lo, step) == (lo, lo + step)
 
 
+def test_experiments_in_range_filters_on_start_time():
+    starts = {2: datetime(2026, 9, 20), 1: datetime(2026, 9, 10), 3: datetime(2026, 9, 25)}
+    assert experiments_in_range(starts, None) == [1, 2, 3]
+    assert experiments_in_range(starts, (datetime(2026, 9, 15), datetime(2026, 9, 25))) == [2, 3]
+    assert experiments_in_range(starts, (datetime(2026, 9, 26), datetime(2026, 9, 27))) == []
+
+
+def test_experiment_tab_follows_the_sidebar_time_range(tmp_path):
+    # Two experiments ten days apart: the default "Last 7 days" keeps only the second.
+    ts, chambers, states = [], [], []
+    for day in (datetime(2026, 9, 1), datetime(2026, 9, 11)):
+        for i, (chamber, state) in enumerate([("C1", "Re"), ("C1", "Fl"), ("C2", "Re"), ("C2", "Fl")]):
+            ts.append(day + timedelta(minutes=5 * i))
+            chambers.append(chamber)
+            states.append(state)
+    pl.DataFrame({"ts": ts, "chamber": chambers, "flush_state": states}).write_parquet(tmp_path / "valve.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+    options = at.tabs[2].selectbox(key="experiment_number").options
+    assert [o.split()[0] for o in options] == ["2"]
+
+    at.sidebar.selectbox[0].set_value("All data").run(timeout=60)
+    assert not at.exception
+    options = at.tabs[2].selectbox(key="experiment_number").options
+    assert [o.split()[0] for o in options] == ["1", "2"]
+
+    at.sidebar.selectbox[0].set_value("Last hour").run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value("Cycle averages").run(timeout=60)
+    assert not at.exception
+
+
 def _write_system_health_over(tmp_path, stamps):
     pl.DataFrame(
         {
@@ -1090,7 +1125,7 @@ def test_sidebar_time_range_preset_narrows_the_plotted_data(tmp_path):
 
     preset = at.sidebar.selectbox[0]
     assert preset.label == "Preset"
-    assert preset.value == "All data"
+    assert preset.value == "Last 7 days"
     assert len(_status_points(at)) == 6
 
     preset.set_value("Last hour").run(timeout=60)
@@ -1266,6 +1301,27 @@ def test_metabolism_tab_plots_o2_vs_par_with_fit_and_h_ion_panel(tmp_path):
     # Only the converged chamber gets a curve.
     assert [n for n in names if "fit" in n] == ["C1 fit (Ik=300)"]
     assert len(tab.dataframe) == 2
+
+
+def test_metabolism_tab_follows_the_sidebar_time_range_and_refits(tmp_path):
+    _write_metabolism(tmp_path)
+    # A timestamped table gives the sidebar a range; "Last 6 hours" then keeps
+    # experiments 3 (08:00, excluded) and 4 (12:00, no PAR).
+    _write_system_health_over(tmp_path, [datetime(2026, 9, 18), datetime(2026, 9, 19, 12)])
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.sidebar.selectbox[0].set_value("Last 6 hours").run(timeout=60)
+    assert not at.exception
+    tab = at.tabs[3]
+    names = [d["name"] for d in json.loads(tab.get("plotly_chart")[0].proto.spec)["data"]]
+    assert sorted(names) == ["C1 excluded", "C2 excluded"]
+    assert any("refit over the experiments in the selected time range" in c.value for c in tab.caption)
+
+    at.sidebar.selectbox[0].set_value("All data").run(timeout=60)
+    names = [d["name"] for d in json.loads(at.tabs[3].get("plotly_chart")[0].proto.spec)["data"]]
+    assert "C1 fit (Ik=300)" in names
 
 
 def test_metabolism_tab_empty_state_without_outputs(tmp_path):

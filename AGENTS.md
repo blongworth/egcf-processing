@@ -338,7 +338,16 @@ sidebar geometry doesn't apply here, unlike the Experiment Data tab's live flux.
 - Points use `par_chamber_umol_m2_s` and `chamber_color_map` colours. Excluded fluxes are hollow
   markers, with the reason in the hover. Fluxes with no PAR aren't placed.
 - Below the chart: the P–I parameter table, and an expander with the light incubations' NCP/GPP.
-- These three tables have no `ts`/`timestamp` column, so the sidebar time filter leaves them alone.
+- These three tables have no `ts`/`timestamp` column, so `filter_tables_to_range` leaves them
+  alone. Instead the tab keeps the experiments whose `experiment_start` falls in the sidebar range.
+  When that drops any, it refits the P–I curve over the rows left (`fit_pi_curves`) and says so in
+  the caption. GPP's R stays the pipeline's whole-deployment dark mean.
+
+**Sidebar time range.** The preset defaults to "Last 7 days", anchored at the end of the data.
+Status and Measurements filter raw rows. Experiment Data and Metabolism instead filter whole
+experiments by start time (`experiments_in_range`). Filtering the raw `valve` rows would cut
+incubations at the edges and renumber experiments away from the pipeline output. The cycle-average
+rate and flux-over-time plots cover only the in-range experiments.
 
 **PAR on Layer D.** Every `egcf_fluxes` row carries `par_mean_umol_m2_s`,
 `par_integrated_mol_m2` and `par_coverage` for its experiment. They come from
