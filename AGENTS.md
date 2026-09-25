@@ -155,15 +155,16 @@ flux from a silent default would be worse than an argparse error. They're the sa
 per the project owner. The dashboard's sidebar inputs default to `0.0`, which suppresses the flux
 table with a prompt rather than computing a divide-by-zero.
 
-Reported in **µmol m⁻² h⁻¹** — an explicit project preference over the more common
-mmol m⁻² d⁻¹ convention. Sign is never forced positive: rising concentration = efflux
-(sediment → water) = positive; falling = uptake (e.g. O2 consumption / SOD) = negative.
+Reported in **mmol m⁻² h⁻¹** — still per hour, not the literature's more common mmol m⁻² d⁻¹
+convention; only the molar-prefix scale changed from an earlier µmol m⁻² h⁻¹ convention. Sign is
+never forced positive: rising concentration = efflux (sediment → water) = positive; falling =
+uptake (e.g. O2 consumption / SOD) = negative.
 
 Variables computed, each only when its source column(s) exist on the input table (a missing source
 means the row is absent from the output, never an error):
 
-- **`oxygen`** — from `oxygen_mgL`, converted mg/L → µmol/L at O2's 32 g/mol molar mass.
-- **`h_ion`** — from `10^(-pH)` (mol/L → µmol/L). Note this is a *raw H⁺* flux, which is
+- **`oxygen`** — from `oxygen_mgL`, converted mg/L → mmol/L at O2's 32 g/mol molar mass.
+- **`h_ion`** — from `10^(-pH)` (mol/L → mmol/L). Note this is a *raw H⁺* flux, which is
   unconventional; most benthic studies report total alkalinity flux instead. It's what was asked
   for — don't silently "correct" it to TA without checking, and don't add a TA calculation
   without the DIC/pCO2 second carbonate-system parameter it would need.
@@ -295,7 +296,7 @@ in UTC for mid-September. On a local-time (EDT) clock they would fall 4 h earlie
 **never infers** the offset. Keep it an explicit input and recheck it for every deployment. A
 silent offset puts dawn/dusk incubations at the wrong irradiance and bends any P–I curve.
 
-**Unit naming**: PAR is µmol photons m⁻² **s**⁻¹ (`par_umol_m2_s`) while fluxes are µmol m⁻²
+**Unit naming**: PAR is µmol photons m⁻² **s**⁻¹ (`par_umol_m2_s`) while fluxes are mmol m⁻²
 **h**⁻¹. Keep the `_s` suffix on any derived PAR column so the two can't be confused.
 
 The dashboard's Measurements tab plots `par_umol_m2_s` on the shared, linked time axis, with the
@@ -369,7 +370,7 @@ writes two tables.
   `PAR coverage below minimum` (`--min-par-coverage`, default 0.9), or `r2 below minimum`.
 - R is −mean(used dark O2 flux) per chamber, so it's positive for uptake. It is **not** forced
   positive.
-- On used light rows, `ncp_umol_m2_h` is the O2 flux and `gpp_umol_m2_h` = NCP + R. This assumes
+- On used light rows, `ncp_mmol_m2_h` is the O2 flux and `gpp_mmol_m2_h` = NCP + R. This assumes
   light respiration equals dark respiration.
 
 `egcf_pi_fit` has one row per chamber. It holds a Jassby & Platt (1976) fit,
@@ -380,16 +381,19 @@ for comparison; and point counts. A chamber with fewer than 4 used points, or no
 gets a WARNING and `converged = false` with null parameters.
 
 Units: I (PAR) is per **second** and the fluxes are per **hour**. So α is
-`alpha_umol_m2_h_per_par`, meaning (µmol O2 m⁻² h⁻¹) per (µmol photons m⁻² s⁻¹), and Ik is
+`alpha_mmol_m2_h_per_par`, meaning (mmol O2 m⁻² h⁻¹) per (µmol photons m⁻² s⁻¹), and Ik is
 `ik_umol_m2_s`, in PAR units.
 
 **No r2 filter by default** (`--metabolism-min-r2 0`). A flux near zero, such as one at the
 compensation irradiance, fits a flat line whose r2 is low by construction. Filtering on r2 would
 remove exactly the points that pin the curve's low end.
 
-First real result, 2026-09-18 to 09-21, 18 points per chamber, 9 light and 9 dark:
-- C1: Pmax 1560 ± 265, α 4.1 ± 1.6, R 169 ± 122 against a dark-mean R of 183, Ik 380, r² 0.74.
-- C2: Pmax 3477 ± 523, α 11.8 ± 4.1, R 573 ± 265 against a dark-mean R of 531, Ik 296, r² 0.77.
+First real result, 2026-09-18 to 09-21, 18 points per chamber, 9 light and 9 dark (values below are
+in mmol m⁻² h⁻¹; recorded pre-unit-change against µmol m⁻² h⁻¹ and rescaled by 1/1000 here):
+- C1: Pmax 1.560 ± 0.265, α 0.0041 ± 0.0016, R 0.169 ± 0.122 against a dark-mean R of 0.183,
+  Ik 380, r² 0.74.
+- C2: Pmax 3.477 ± 0.523, α 0.0118 ± 0.0041, R 0.573 ± 0.265 against a dark-mean R of 0.531,
+  Ik 296, r² 0.77.
 
 That's with placeholder geometry (4 L / 0.06 m²), so the magnitudes scale with the real V/A. The
 fitted R agrees with the measured dark-mean R within its standard error, which is the sanity
@@ -583,8 +587,8 @@ replaced by a prompt when the sidebar's chamber volume/area are still at their
 
 1. `_render_experiment_flux_chart` -- grouped bars of the selected experiment's
    flux, **one subplot per variable**. Not one grouped bar chart: the variables
-   carry different units and magnitudes spanning four orders (oxygen ~1e4
-   µmol m⁻² h⁻¹ beside h_ion ~1e0), so on a shared axis everything but oxygen
+   carry different units and magnitudes spanning four orders (oxygen ~1e1
+   mmol m⁻² h⁻¹ beside h_ion ~1e-3), so on a shared axis everything but oxygen
    flattens to nothing.
 2. The exact-numbers `st.dataframe` underneath.
 3. `_render_flux_over_time` -- flux against experiment start for the **whole

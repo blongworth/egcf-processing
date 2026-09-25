@@ -1113,7 +1113,7 @@ def _render_experiment_flux_chart(exp_fluxes: pl.DataFrame, experiment: str) -> 
 
     One subplot per variable rather than one grouped bar chart, because the
     variables carry different units and magnitudes spanning four orders
-    (oxygen ~1e4 umol m-2 h-1 next to h_ion ~1e0) -- on a shared axis
+    (oxygen ~1e1 mmol m-2 h-1 next to h_ion ~1e-3) -- on a shared axis
     everything but oxygen flattens to nothing.
     """
     variables = sorted(exp_fluxes["variable"].unique().to_list())
@@ -1326,7 +1326,7 @@ def _pi_curve_traces(pi_fit: pl.DataFrame | None, par_max: float, colors: dict[s
         traces.append(
             go.Scatter(
                 x=grid,
-                y=jassby_platt(grid, row["pmax_umol_m2_h"], row["alpha_umol_m2_h_per_par"], row["r_fit_umol_m2_h"]),
+                y=jassby_platt(grid, row["pmax_mmol_m2_h"], row["alpha_mmol_m2_h_per_par"], row["r_fit_mmol_m2_h"]),
                 mode="lines",
                 line={"color": colors.get(chamber), "width": 2},
                 name=f"{chamber} fit (Ik={row['ik_umol_m2_s']:.0f})",
@@ -1400,13 +1400,13 @@ def render_metabolism_tab(tables: dict[str, pl.DataFrame | None]) -> None:
             h_ion = None
 
     rows = 2 if h_ion is not None else 1
-    titles = ["O2 flux (µmol m⁻² h⁻¹)"] + (["H⁺ flux (µmol m⁻² h⁻¹) — should oppose O2"] if h_ion is not None else [])
+    titles = ["O2 flux (mmol m⁻² h⁻¹)"] + (["H⁺ flux (mmol m⁻² h⁻¹) — should oppose O2"] if h_ion is not None else [])
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, subplot_titles=titles, vertical_spacing=0.08)
     for chamber in chambers:
         for used in (True, False):
             g = placed.filter((pl.col("chamber") == chamber) & (pl.col("used") == used))
             if not g.is_empty():
-                fig.add_trace(_metabolism_scatter(g, "o2_flux_umol_m2_h", chamber, colors[chamber], used, True), row=1, col=1)
+                fig.add_trace(_metabolism_scatter(g, "o2_flux_mmol_m2_h", chamber, colors[chamber], used, True), row=1, col=1)
             if h_ion is not None:
                 gh = h_ion.filter((pl.col("chamber") == chamber) & (pl.col("used") == used))
                 if not gh.is_empty():
@@ -1423,7 +1423,7 @@ def render_metabolism_tab(tables: dict[str, pl.DataFrame | None]) -> None:
         st.subheader("P–I fit (Jassby–Platt)")
         st.caption(
             "NCP = Pmax·tanh(α·I/Pmax) − R, per chamber, over used light and dark fluxes. "
-            "Fluxes in µmol O2 m⁻² h⁻¹; I and Ik in µmol photons m⁻² s⁻¹. R (dark mean) is the measured check on R (fit)."
+            "Fluxes in mmol O2 m⁻² h⁻¹; I and Ik in µmol photons m⁻² s⁻¹. R (dark mean) is the measured check on R (fit)."
         )
         st.dataframe(pi_fit, width="stretch", hide_index=True)
 
@@ -1432,7 +1432,7 @@ def render_metabolism_tab(tables: dict[str, pl.DataFrame | None]) -> None:
         with st.expander("Light incubations: NCP and GPP"):
             st.dataframe(
                 light.select(
-                    "experiment_number", "chamber", "experiment_start", "par_chamber_umol_m2_s", "ncp_umol_m2_h", "gpp_umol_m2_h", "r2"
+                    "experiment_number", "chamber", "experiment_start", "par_chamber_umol_m2_s", "ncp_mmol_m2_h", "gpp_mmol_m2_h", "r2"
                 ),
                 width="stretch",
                 hide_index=True,

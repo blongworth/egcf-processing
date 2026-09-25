@@ -17,7 +17,7 @@ fit parameter is relative to ambient light, not light at the sediment.
 
 The P-I fit is Jassby & Platt (1976), NCP = Pmax*tanh(alpha*I/Pmax) - R, over
 light and dark points together, per chamber. I is PAR in umol photons m^-2 s^-1
-while fluxes are umol O2 m^-2 h^-1, so alpha's unit is (umol O2 m^-2 h^-1) per
+while fluxes are mmol O2 m^-2 h^-1, so alpha's unit is (mmol O2 m^-2 h^-1) per
 (umol photons m^-2 s^-1) and Ik = Pmax/alpha is in PAR units.
 """
 
@@ -51,13 +51,13 @@ METABOLISM_SCHEMA = {
     "par_integrated_mol_m2": pl.Float64,
     "par_coverage": pl.Float64,
     "par_chamber_umol_m2_s": pl.Float64,
-    "o2_flux_umol_m2_h": pl.Float64,
+    "o2_flux_mmol_m2_h": pl.Float64,
     "r2": pl.Float64,
     "period": pl.Utf8,
     "used": pl.Boolean,
     "excluded_reason": pl.Utf8,
-    "ncp_umol_m2_h": pl.Float64,
-    "gpp_umol_m2_h": pl.Float64,
+    "ncp_mmol_m2_h": pl.Float64,
+    "gpp_mmol_m2_h": pl.Float64,
 }
 
 PI_FIT_SCHEMA = {
@@ -66,12 +66,12 @@ PI_FIT_SCHEMA = {
     "n_points": pl.Int64,
     "n_light": pl.Int64,
     "n_dark": pl.Int64,
-    "r_dark_umol_m2_h": pl.Float64,
-    "pmax_umol_m2_h": pl.Float64,
+    "r_dark_mmol_m2_h": pl.Float64,
+    "pmax_mmol_m2_h": pl.Float64,
     "pmax_se": pl.Float64,
-    "alpha_umol_m2_h_per_par": pl.Float64,
+    "alpha_mmol_m2_h_per_par": pl.Float64,
     "alpha_se": pl.Float64,
-    "r_fit_umol_m2_h": pl.Float64,
+    "r_fit_mmol_m2_h": pl.Float64,
     "r_fit_se": pl.Float64,
     "ik_umol_m2_s": pl.Float64,
     "fit_r2": pl.Float64,
@@ -109,7 +109,7 @@ def classify_o2_fluxes(
         "par_integrated_mol_m2",
         "par_coverage",
         (pl.col("par_mean_umol_m2_s") * chamber_par_transmittance).alias("par_chamber_umol_m2_s"),
-        pl.col("output_value").alias("o2_flux_umol_m2_h"),
+        pl.col("output_value").alias("o2_flux_mmol_m2_h"),
         "r2",
     ).with_columns(
         pl.when(par.is_null())
@@ -130,14 +130,14 @@ def classify_o2_fluxes(
     r_dark = (
         rows.filter(pl.col("used") & (pl.col("period") == "dark"))
         .group_by("chamber")
-        .agg((-pl.col("o2_flux_umol_m2_h").mean()).alias("_r_dark"))
+        .agg((-pl.col("o2_flux_mmol_m2_h").mean()).alias("_r_dark"))
     )
     is_light = pl.col("used") & (pl.col("period") == "light")
     return (
         rows.join(r_dark, on="chamber", how="left")
         .with_columns(
-            pl.when(is_light).then(pl.col("o2_flux_umol_m2_h")).alias("ncp_umol_m2_h"),
-            pl.when(is_light).then(pl.col("o2_flux_umol_m2_h") + pl.col("_r_dark")).alias("gpp_umol_m2_h"),
+            pl.when(is_light).then(pl.col("o2_flux_mmol_m2_h")).alias("ncp_mmol_m2_h"),
+            pl.when(is_light).then(pl.col("o2_flux_mmol_m2_h") + pl.col("_r_dark")).alias("gpp_mmol_m2_h"),
         )
         .select(list(METABOLISM_SCHEMA))
         .cast(METABOLISM_SCHEMA)
@@ -155,7 +155,7 @@ def _fit_chamber(chamber: str, group: pl.DataFrame, chamber_par_transmittance: f
         n_points=group.height,
         n_light=light.height,
         n_dark=dark.height,
-        r_dark_umol_m2_h=-dark["o2_flux_umol_m2_h"].mean() if dark.height else None,
+        r_dark_mmol_m2_h=-dark["o2_flux_mmol_m2_h"].mean() if dark.height else None,
         converged=False,
     )
     if group.height < MIN_FIT_POINTS or light.is_empty():
@@ -169,8 +169,8 @@ def _fit_chamber(chamber: str, group: pl.DataFrame, chamber_par_transmittance: f
         return row
 
     par = group["par_chamber_umol_m2_s"].to_numpy()
-    flux = group["o2_flux_umol_m2_h"].to_numpy()
-    r0 = row["r_dark_umol_m2_h"] if row["r_dark_umol_m2_h"] is not None else -float(flux.min())
+    flux = group["o2_flux_mmol_m2_h"].to_numpy()
+    r0 = row["r_dark_mmol_m2_h"] if row["r_dark_mmol_m2_h"] is not None else -float(flux.min())
     pmax0 = max(float(flux.max()) + r0, 1.0)
     alpha0 = pmax0 / max(float(np.median(light["par_chamber_umol_m2_s"].to_numpy())), 1.0)
     try:
@@ -191,11 +191,11 @@ def _fit_chamber(chamber: str, group: pl.DataFrame, chamber_par_transmittance: f
     residuals = flux - jassby_platt(par, *popt)
     ss_tot = float(((flux - flux.mean()) ** 2).sum())
     row.update(
-        pmax_umol_m2_h=pmax,
+        pmax_mmol_m2_h=pmax,
         pmax_se=se[0],
-        alpha_umol_m2_h_per_par=alpha,
+        alpha_mmol_m2_h_per_par=alpha,
         alpha_se=se[1],
-        r_fit_umol_m2_h=r,
+        r_fit_mmol_m2_h=r,
         r_fit_se=se[2],
         ik_umol_m2_s=pmax / alpha,
         fit_r2=1 - float((residuals**2).sum()) / ss_tot if ss_tot > 0 else None,

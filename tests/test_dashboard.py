@@ -385,10 +385,10 @@ def test_flux_variable_units():
     fluxes = pl.DataFrame(
         {
             "variable": ["oxygen", "oxygen", "temp_degC"],
-            "output_unit": ["umol m-2 h-1", "umol m-2 h-1", "degC h-1"],
+            "output_unit": ["mmol m-2 h-1", "mmol m-2 h-1", "degC h-1"],
         }
     )
-    assert flux_variable_units(fluxes) == {"oxygen": "umol m-2 h-1", "temp_degC": "degC h-1"}
+    assert flux_variable_units(fluxes) == {"oxygen": "mmol m-2 h-1", "temp_degC": "degC h-1"}
 
 
 def _write_two_experiments_one_thin(tmp_path):
@@ -470,7 +470,7 @@ def test_flux_variable_selector_filters_the_flux_over_time_subplots(tmp_path):
     spec = _flux_over_time_spec(at.tabs[2])
     titles = [a["text"] for a in spec["layout"]["annotations"]]
     assert len(titles) == 1 < all_subplots
-    assert titles[0].startswith("oxygen (umol m-2 h-1)")
+    assert titles[0].startswith("oxygen (mmol m-2 h-1)")
 
     at.tabs[2].multiselect(key="flux_variables").set_value([]).run(timeout=60)
     assert not at.exception
@@ -552,7 +552,7 @@ def test_experiment_tab_flux_table_needs_chamber_geometry(tmp_path):
     oxygen = flux_table.filter(pl.col("variable") == "oxygen")
     # 8.0 -> 7.0 mg/L over the 10 min between the two cycles' window starts.
     assert oxygen["slope_native_per_min"][0] == pytest.approx(-0.1)
-    assert oxygen["output_value"][0] == pytest.approx(-0.1 * (1000 / 32) * 4.0 / 0.06 * 60)
+    assert oxygen["output_value"][0] == pytest.approx(-0.1 * (1 / 32) * 4.0 / 0.06 * 60)
 
 
 def test_experiment_tab_full_data_grain_shows_experiment_start_subtitle(tmp_path):
@@ -1214,20 +1214,20 @@ def _write_metabolism(tmp_path):
             "par_integrated_mol_m2": [0.07, 0.07, 5.4, 5.4, 10.8, 10.8, None, None],
             "par_coverage": [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, None, None],
             "par_chamber_umol_m2_s": [6.5, 6.5, 500.0, 500.0, 1000.0, 1000.0, None, None],
-            "o2_flux_umol_m2_h": [-200.0, -500.0, 1000.0, 2500.0, 1400.0, 3200.0, 10.0, 10.0],
+            "o2_flux_mmol_m2_h": [-200.0, -500.0, 1000.0, 2500.0, 1400.0, 3200.0, 10.0, 10.0],
             "r2": [0.9, 0.9, 0.95, 0.95, None, 0.9, 0.5, 0.5],
             "period": ["dark", "dark", "light", "light", "light", "light", None, None],
             "used": [True, True, True, True, False, False, False, False],
             "excluded_reason": [None, None, None, None, "PAR coverage below minimum", "PAR coverage below minimum", "no PAR", "no PAR"],
-            "ncp_umol_m2_h": [None, None, 1000.0, 2500.0, None, None, None, None],
-            "gpp_umol_m2_h": [None, None, 1200.0, 3000.0, None, None, None, None],
+            "ncp_mmol_m2_h": [None, None, 1000.0, 2500.0, None, None, None, None],
+            "gpp_mmol_m2_h": [None, None, 1200.0, 3000.0, None, None, None, None],
         },
         schema=METABOLISM_SCHEMA,
     ).write_parquet(tmp_path / "egcf_metabolism.parquet")
     pl.DataFrame(
         [
             {**{k: None for k in PI_FIT_SCHEMA}, "chamber": "C1", "chamber_par_transmittance": 1.0, "n_points": 4,
-             "pmax_umol_m2_h": 1500.0, "alpha_umol_m2_h_per_par": 5.0, "r_fit_umol_m2_h": 200.0,
+             "pmax_mmol_m2_h": 1500.0, "alpha_mmol_m2_h_per_par": 5.0, "r_fit_mmol_m2_h": 200.0,
              "ik_umol_m2_s": 300.0, "converged": True},
             {**{k: None for k in PI_FIT_SCHEMA}, "chamber": "C2", "chamber_par_transmittance": 1.0, "n_points": 2,
              "converged": False},
@@ -1259,7 +1259,7 @@ def test_metabolism_tab_plots_o2_vs_par_with_fit_and_h_ion_panel(tmp_path):
     tab = _metabolism_tab(tmp_path)
     spec = json.loads(tab.get("plotly_chart")[0].proto.spec)
     titles = [a["text"] for a in spec["layout"]["annotations"]]
-    assert titles == ["O2 flux (µmol m⁻² h⁻¹)", "H⁺ flux (µmol m⁻² h⁻¹) — should oppose O2"]
+    assert titles == ["O2 flux (mmol m⁻² h⁻¹)", "H⁺ flux (mmol m⁻² h⁻¹) — should oppose O2"]
     names = [d["name"] for d in spec["data"]]
     # Rows with no PAR aren't placed; excluded-but-placed rows are hollow.
     assert names.count("C1") == 2 and "C1 excluded" in names

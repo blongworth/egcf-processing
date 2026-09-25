@@ -129,10 +129,10 @@ def test_end_to_end_pipeline_computes_oxygen_flux(tmp_path):
     oxygen = fluxes.filter(pl.col("variable") == "oxygen")
     assert oxygen.height == 1
     assert oxygen["chamber"][0] == "C1"
-    # -0.5 mg/L/min * (1000/32) umol/mg * 4.0 L / 0.06 m^2 * 60 min/h.
+    # -0.5 mg/L/min * (1/32) mmol/mg * 4.0 L / 0.06 m^2 * 60 min/h.
     assert oxygen["slope_native_per_min"][0] == pytest.approx(-0.5)
-    assert oxygen["output_value"][0] == pytest.approx(-0.5 * (1000 / 32) * 4.0 / 0.06 * 60)
-    assert oxygen["output_unit"][0] == "umol m-2 h-1"
+    assert oxygen["output_value"][0] == pytest.approx(-0.5 * (1 / 32) * 4.0 / 0.06 * 60)
+    assert oxygen["output_unit"][0] == "mmol m-2 h-1"
 
 
 def test_end_to_end_pipeline_csv_format(tmp_path):
@@ -244,8 +244,8 @@ def test_end_to_end_pipeline_writes_par_and_averages_it_onto_cycles(tmp_path):
     assert {"par_mean_umol_m2_s", "par_integrated_mol_m2", "par_coverage"} <= set(fluxes.columns)
 
     # No scalup in FILE_1, so no O2 flux: metabolism and the P-I fit are written empty, with schema.
-    assert pl.read_parquet(out_dir / "egcf_metabolism.parquet").columns[-2:] == ["ncp_umol_m2_h", "gpp_umol_m2_h"]
-    assert "pmax_umol_m2_h" in pl.read_parquet(out_dir / "egcf_pi_fit.parquet").columns
+    assert pl.read_parquet(out_dir / "egcf_metabolism.parquet").columns[-2:] == ["ncp_mmol_m2_h", "gpp_mmol_m2_h"]
+    assert "pmax_mmol_m2_h" in pl.read_parquet(out_dir / "egcf_pi_fit.parquet").columns
 
     par_daily = pl.read_parquet(out_dir / "par_daily.parquet")
     assert stats["n_par_days"] == 1

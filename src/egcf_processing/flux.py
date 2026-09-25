@@ -7,8 +7,8 @@ the chamber's enclosed water volume, and A is the sediment footprint area
 enclosed by the chamber base -- both constant across chambers per the
 project owner, passed in rather than hardcoded since no "nominal" chamber
 size exists (unlike the RGA's nominal Faraday-cup sensitivity in
-aggregate.py). Reported in umol m^-2 h^-1 (an explicit standing preference
-over the more common mmol m^-2 d^-1 convention), except temp_degC, which is
+aggregate.py). Reported in mmol m^-2 h^-1 -- per hour, not the literature's
+more common mmol m^-2 d^-1 -- except temp_degC, which is
 a rate (degC h^-1) rather than a real flux -- there's no mass/energy
 conservation quantity for temperature without water density and specific
 heat capacity, out of scope here. This is a diagnostic (is the chamber
@@ -25,10 +25,10 @@ import math
 
 import polars as pl
 
-O2_UMOL_PER_MG = (
-    1 / 1000 * 1 / 32 * 1e6
-)  # mg/L -> umol/L; mg -> g, g -> mol, mol -> umol; O2 molar mass 32 g/mol
-H_ION_UMOL_PER_MOL = 1e6  # mol/L -> umol/L
+O2_MMOL_PER_MG = (
+    1 / 1000 * 1 / 32 * 1000
+)  # mg/L -> mmol/L; mg -> g, g -> mol, mol -> mmol; O2 molar mass 32 g/mol
+H_ION_MMOL_PER_MOL = 1000  # mol/L -> mmol/L
 
 MIN_PER_HOUR = 60.0
 
@@ -273,7 +273,7 @@ def concentration_series(cycles: pl.DataFrame, value_col: str) -> pl.DataFrame:
 def _flux_rows(
     series: pl.DataFrame,
     variable: str,
-    native_to_umol_per_l: float,
+    native_to_mmol_per_l: float,
     chamber_volume_l: float,
     chamber_area_m2: float,
 ) -> list[dict]:
@@ -287,11 +287,11 @@ def _flux_rows(
             "r2": row["r2"],
             "n_points": row["n"],
             "output_value": row["slope"]
-            * native_to_umol_per_l
+            * native_to_mmol_per_l
             * chamber_volume_l
             / chamber_area_m2
             * MIN_PER_HOUR,
-            "output_unit": "umol m-2 h-1",
+            "output_unit": "mmol m-2 h-1",
         }
         for row in series.iter_rows(named=True)
     ]
@@ -387,7 +387,7 @@ def compute_fluxes(
     if "oxygen_mgL" in cycles.columns:
         series = concentration_series(cycles, "oxygen_mgL")
         rows += _flux_rows(
-            series, "oxygen", O2_UMOL_PER_MG, chamber_volume_l, chamber_area_m2
+            series, "oxygen", O2_MMOL_PER_MG, chamber_volume_l, chamber_area_m2
         )
 
     if "pH" in cycles.columns:
@@ -396,7 +396,7 @@ def compute_fluxes(
         )
         series = concentration_series(h_ion, "_h_ion_mol_l")
         rows += _flux_rows(
-            series, "h_ion", H_ION_UMOL_PER_MOL, chamber_volume_l, chamber_area_m2
+            series, "h_ion", H_ION_MMOL_PER_MOL, chamber_volume_l, chamber_area_m2
         )
 
     if {"mass_28_avg", "mass_40_avg", "temp_degC", "sal_PSU"} <= set(cycles.columns):
@@ -405,7 +405,7 @@ def compute_fluxes(
         )
         series = concentration_series(n2, "_n2_umol_l")
         rows += _flux_rows(
-            series, "n2_denitrification", 1.0, chamber_volume_l, chamber_area_m2
+            series, "n2_denitrification", 1e-3, chamber_volume_l, chamber_area_m2
         )
 
     if "temp_degC" in cycles.columns:

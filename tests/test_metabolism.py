@@ -41,9 +41,9 @@ def test_classify_splits_light_dark_by_threshold_and_computes_r_ncp_gpp():
     assert m.columns == list(METABOLISM_SCHEMA)
     assert m["period"].to_list() == ["dark", "dark", "light", "light"]
     assert m["used"].all()
-    assert m["ncp_umol_m2_h"].to_list() == [None, None, 800.0, 1200.0]
+    assert m["ncp_mmol_m2_h"].to_list() == [None, None, 800.0, 1200.0]
     # R = -mean(dark) = 200, so GPP = NCP + 200.
-    assert m["gpp_umol_m2_h"].to_list() == [None, None, 1000.0, 1400.0]
+    assert m["gpp_mmol_m2_h"].to_list() == [None, None, 1000.0, 1400.0]
 
 
 def test_classify_threshold_is_configurable():
@@ -59,7 +59,7 @@ def test_classify_keeps_excluded_rows_with_a_reason():
     assert m["excluded_reason"].to_list() == ["no PAR", "PAR coverage below minimum", "r2 below minimum", None]
     assert m["used"].to_list() == [False, False, False, True]
     assert m["period"].to_list() == [None, "light", "light", "light"]
-    assert m["ncp_umol_m2_h"].to_list() == [None, None, None, 4.0]
+    assert m["ncp_mmol_m2_h"].to_list() == [None, None, None, 4.0]
 
 
 def test_classify_default_does_not_filter_on_r2():
@@ -70,12 +70,12 @@ def test_classify_default_does_not_filter_on_r2():
 def test_classify_does_not_force_r_positive():
     m = classify_o2_fluxes(_fluxes([6.5, 500.0], [50.0, 800.0]))
     # A positive mean dark flux gives R = -50; GPP = NCP + R is reported as-is.
-    assert m["gpp_umol_m2_h"].to_list() == [None, 750.0]
+    assert m["gpp_mmol_m2_h"].to_list() == [None, 750.0]
 
 
 def test_classify_gpp_null_without_dark_rows():
     m = classify_o2_fluxes(_fluxes([500.0, 900.0], [800.0, 1200.0]))
-    assert m["gpp_umol_m2_h"].to_list() == [None, None]
+    assert m["gpp_mmol_m2_h"].to_list() == [None, None]
 
 
 def test_classify_empty_input_keeps_schema():
@@ -91,9 +91,9 @@ def test_fit_recovers_known_jassby_platt_parameters():
     row = fit.row(0, named=True)
     assert row["converged"]
     assert row["n_light"] == 8 and row["n_dark"] == 4
-    assert row["pmax_umol_m2_h"] == pytest.approx(2000.0, rel=1e-4)
-    assert row["alpha_umol_m2_h_per_par"] == pytest.approx(8.0, rel=1e-4)
-    assert row["r_fit_umol_m2_h"] == pytest.approx(300.0, rel=1e-4)
+    assert row["pmax_mmol_m2_h"] == pytest.approx(2000.0, rel=1e-4)
+    assert row["alpha_mmol_m2_h_per_par"] == pytest.approx(8.0, rel=1e-4)
+    assert row["r_fit_mmol_m2_h"] == pytest.approx(300.0, rel=1e-4)
     assert row["ik_umol_m2_s"] == pytest.approx(250.0, rel=1e-4)
     assert row["fit_r2"] == pytest.approx(1.0)
 
@@ -104,7 +104,7 @@ def test_fit_is_per_chamber():
     c2 = _fluxes(par, jassby_platt(np.array(par), 3000.0, 10.0, 500.0).tolist(), chamber="C2")
     fit = fit_pi_curves(classify_o2_fluxes(pl.concat([c1, c2])))
     assert fit["chamber"].to_list() == ["C1", "C2"]
-    assert fit["pmax_umol_m2_h"].to_list() == pytest.approx([1000.0, 3000.0], rel=1e-3)
+    assert fit["pmax_mmol_m2_h"].to_list() == pytest.approx([1000.0, 3000.0], rel=1e-3)
 
 
 def test_fit_skipped_with_too_few_points_warns(caplog):
@@ -112,8 +112,8 @@ def test_fit_skipped_with_too_few_points_warns(caplog):
         fit = fit_pi_curves(classify_o2_fluxes(_fluxes([6.5, 500.0, 900.0], [-100.0, 800.0, 1200.0])))
     row = fit.row(0, named=True)
     assert not row["converged"]
-    assert row["pmax_umol_m2_h"] is None
-    assert row["r_dark_umol_m2_h"] == 100.0
+    assert row["pmax_mmol_m2_h"] is None
+    assert row["r_dark_mmol_m2_h"] == 100.0
     assert "P-I fit for C1 skipped" in caplog.text
 
 
@@ -133,7 +133,7 @@ def test_transmittance_scales_chamber_par_used_for_period_and_fit():
     assert m["period"].to_list()[:2] == ["dark", "dark"]
     fit = fit_pi_curves(m, chamber_par_transmittance=0.5).row(0, named=True)
     assert fit["chamber_par_transmittance"] == 0.5
-    assert fit["alpha_umol_m2_h_per_par"] == pytest.approx(8.0, rel=1e-3)
+    assert fit["alpha_mmol_m2_h_per_par"] == pytest.approx(8.0, rel=1e-3)
 
 
 def test_transmittance_out_of_range_is_rejected():

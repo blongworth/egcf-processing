@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from egcf_processing.flux import (
-    O2_UMOL_PER_MG,
+    O2_MMOL_PER_MG,
     ar_solubility_umol_kg,
     attach_experiment_par,
     compute_fluxes,
@@ -156,8 +156,8 @@ def test_oxygen_flux_is_signed_and_scaled_by_volume_over_area():
     oxygen = fluxes.filter(pl.col("variable") == "oxygen")
     assert oxygen.height == 1
     assert oxygen["slope_native_per_min"][0] == pytest.approx(-1.0)
-    assert oxygen["output_value"][0] == pytest.approx(-1.0 * O2_UMOL_PER_MG * VOLUME_L / AREA_M2 * 60)
-    assert oxygen["output_unit"][0] == "umol m-2 h-1"
+    assert oxygen["output_value"][0] == pytest.approx(-1.0 * O2_MMOL_PER_MG * VOLUME_L / AREA_M2 * 60)
+    assert oxygen["output_unit"][0] == "mmol m-2 h-1"
 
 
 def test_h_ion_flux_from_ph():
@@ -166,7 +166,7 @@ def test_h_ion_flux_from_ph():
     h_ion = fluxes.filter(pl.col("variable") == "h_ion")
     expected_slope = 1e-7 - 1e-8
     assert h_ion["slope_native_per_min"][0] == pytest.approx(expected_slope)
-    assert h_ion["output_value"][0] == pytest.approx(expected_slope * 1e6 * VOLUME_L / AREA_M2 * 60)
+    assert h_ion["output_value"][0] == pytest.approx(expected_slope * 1e3 * VOLUME_L / AREA_M2 * 60)
 
 
 def test_temperature_is_a_rate_not_a_flux():
@@ -189,7 +189,7 @@ def test_n2_denitrification_flux_from_mass_28_to_40_ratio():
     ar = ar_solubility_umol_kg(10.0, 32.0) * seawater_density_kg_per_l(10.0, 32.0)
     expected_slope = (0.11 - 0.10) * ar
     assert n2["slope_native_per_min"][0] == pytest.approx(expected_slope)
-    assert n2["output_value"][0] == pytest.approx(expected_slope * VOLUME_L / AREA_M2 * 60)
+    assert n2["output_value"][0] == pytest.approx(expected_slope * 1e-3 * VOLUME_L / AREA_M2 * 60)
 
 
 def test_n2_argon_term_is_anchored_at_the_incubation_start_not_recomputed_per_cycle():
