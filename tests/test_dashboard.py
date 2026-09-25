@@ -382,6 +382,55 @@ def test_chamber_color_map_is_stable_regardless_of_input_order():
     assert len(set(chamber_color_map(["C1", "C2"]).values())) == 2
 
 
+def test_hobo_oxygen_comparison_and_mesocosm_diff_plots(tmp_path):
+    valve_df = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, 0), datetime(2026, 1, 1, 0, 5, 0)],
+            "chamber": ["C1", "C1"],
+            "flush_state": ["Re", "Fl"],
+        }
+    )
+    valve_df.write_parquet(tmp_path / "valve.parquet")
+    scalup_df = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 1, 0), datetime(2026, 1, 1, 0, 3, 0)],
+            "oxygen_mgl": [8.0, 8.1],
+        },
+        schema={"ts": pl.Datetime, "oxygen_mgl": pl.Float64},
+    )
+    scalup_df.write_parquet(tmp_path / "scalup.parquet")
+    hobo_df = pl.DataFrame(
+        {
+            "ts": [
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 0, 1, 0),
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 0, 1, 0),
+            ],
+            "location": ["C1", "C1", "mesocosm", "mesocosm"],
+            "oxygen_mgl": [8.5, 8.4, 9.0, 9.0],
+            "temp_degc": [20.0, 20.0, 20.0, 20.0],
+            "serial_number": ["1", "1", "2", "2"],
+        }
+    )
+    hobo_df.write_parquet(tmp_path / "hobo_oxygen.parquet")
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    assert not at.exception
+
+    experiment_specs = [c.proto.spec for c in at.tabs[2].get("plotly_chart")]
+    assert any("oxygen vs mesocosm" in spec for spec in experiment_specs)
+    assert not any("mesocosm minus chamber oxygen" in spec for spec in experiment_specs)
+
+    measurements_specs = [c.proto.spec for c in at.tabs[1].get("plotly_chart")]
+    combined_measurements_spec = " ".join(measurements_specs)
+    assert "Mesocosm minus chamber oxygen" in combined_measurements_spec
+    assert "HOBO + SCALUP oxygen" in combined_measurements_spec
+    assert "SCALUP oxygen_mgl" in combined_measurements_spec
+
+
 def test_flux_variable_units():
     fluxes = pl.DataFrame(
         {

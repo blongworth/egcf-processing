@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from egcf_processing.hobo import is_hobo_export
 from egcf_processing.par import is_odyssey_export
 
 _GEMS_FILENAME_RE = re.compile(r"^gems_(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})\.txt$")
@@ -117,3 +118,12 @@ def find_par_files(raw_dir: Path) -> list[Path]:
     """
     paths = {p for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".csv"}
     return sorted(p for p in paths if p.stat().st_size > 0 and is_odyssey_export(p))
+
+
+def find_hobo_files(raw_dir: Path) -> list[Path]:
+    """Find HOBO oxygen logger exports (*.csv/*.CSV) under raw_dir, sorted by path.
+
+    Identified by header content (see hobo.is_hobo_export), not filename.
+    """
+    paths = {p for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".csv"}
+    return sorted(p for p in paths if p.stat().st_size > 0 and is_hobo_export(p))

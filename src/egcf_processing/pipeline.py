@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from egcf_processing import aggregate, combine, cycles, discovery, events, flux, metabolism, par, reader, rga_scans
+from egcf_processing import aggregate, combine, cycles, discovery, events, flux, hobo, metabolism, par, reader, rga_scans
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ def run(
     par_time_offset_h: float = DEFAULT_PAR_TIME_OFFSET_H,
     par_start: datetime | None = None,
     par_end: datetime | None = None,
+    hobo_dir: Path | None = None,
     dark_par_threshold_umol_m2_s: float = DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
     min_par_coverage: float = DEFAULT_MIN_PAR_COVERAGE,
     metabolism_min_r2: float = DEFAULT_METABOLISM_MIN_R2,
@@ -79,6 +80,13 @@ def run(
             trend["pct_per_day"],
             trend["r2"],
         )
+
+    hobo_search_dir = hobo_dir if hobo_dir is not None else raw_dir
+    hobo_files = discovery.find_hobo_files(hobo_search_dir)
+    logger.info("found %d HOBO oxygen logger export(s) under %s", len(hobo_files), hobo_search_dir)
+    hobo_table = hobo.read_all_hobo(hobo_files)
+    hobo_path = combine.write_df(hobo_table, out_dir, "hobo_oxygen", output_format)
+    logger.info("wrote hobo_oxygen (%d rows) -> %s", hobo_table.height, hobo_path)
 
     chamber_windows, cycle_stats = cycles.chamber_cycle_windows(tables["valve"], settle_offset_s)
     logger.info(
@@ -146,6 +154,7 @@ def run(
         "n_system_health_rows": tables["system_health"].height,
         "n_par_rows": par_table.height,
         "n_par_days": par_daily.height,
+        "n_hobo_rows": hobo_table.height,
         "cycle_stats": cycle_stats,
         "layer_b_rows": layer_b.height,
         "layer_c_rows": layer_c.height,

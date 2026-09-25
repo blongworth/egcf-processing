@@ -103,6 +103,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Drop PAR rows at or after this ISO datetime (after the time offset), e.g. recovery",
     )
     parser.add_argument(
+        "--hobo-dir",
+        type=Path,
+        default=None,
+        help="Directory to search for HOBO oxygen logger exports; defaults to raw_dir",
+    )
+    parser.add_argument(
         "--dark-par-threshold",
         type=float,
         default=DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
@@ -146,6 +152,7 @@ def main(argv: list[str] | None = None) -> None:
         par_time_offset_h=args.par_time_offset_h,
         par_start=args.par_start,
         par_end=args.par_end,
+        hobo_dir=args.hobo_dir,
         dark_par_threshold_umol_m2_s=args.dark_par_threshold,
         min_par_coverage=args.min_par_coverage,
         metabolism_min_r2=args.metabolism_min_r2,

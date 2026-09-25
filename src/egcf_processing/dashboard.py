@@ -37,6 +37,7 @@ TABLE_NAMES = [
     "scalup",
     "valve",
     "par",
+    "hobo_oxygen",
     "egcf_rga_scans",
     "egcf_chamber_cycles",
     "egcf_fluxes",
@@ -263,6 +264,21 @@ def chamber_color_map(chambers: list[str]) -> dict[str, str]:
     every plot on the tab, regardless of which subset a particular plot shows.
     """
     return {c: _MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)] for i, c in enumerate(sorted(chambers))}
+
+
+_MESOCOSM_COLOR = "#B0B0B0"
+_SCALUP_OXYGEN_COLOR = _MASS_COLOR_PALETTE[2]
+
+
+def _hobo_location_colors(hobo: pl.DataFrame) -> dict[str, str]:
+    """Chamber locations get chamber_color_map's colors; mesocosm gets a fixed gray,
+    matching its role as a reference series rather than a chamber."""
+    locations = sorted(hobo["location"].unique().to_list())
+    chambers = [loc for loc in locations if loc != "mesocosm"]
+    colors = chamber_color_map(chambers)
+    if "mesocosm" in locations:
+        colors["mesocosm"] = _MESOCOSM_COLOR
+    return {loc: colors[loc] for loc in locations}
 
 
 def flux_variable_units(fluxes: pl.DataFrame) -> dict[str, str]:
@@ -549,9 +565,8 @@ def _shade_chamber_spans(fig: go.Figure, spans: pl.DataFrame) -> None:
 
 
 def _render_linked_timeseries(
-    sections: list[tuple[str, list[go.Scatter], bool, bool]],
+    sections: list[tuple[str, list[go.Scatter], bool, bool] | tuple[str, list[go.Scatter], bool, bool, bool]],
     title: str,
-    zero_line: bool = False,
     chamber_spans: pl.DataFrame | None = None,
 ) -> None:
     """Render one subplot per section, stacked with a shared, zoom/pan-linked time axis.
@@ -560,19 +575,19 @@ def _render_linked_timeseries(
     for the Amps/Torr panels whose magnitudes (~1e-8 to 1e-16) are unreadable
     in plain decimal. The fourth element requests a log-scale y-axis, for the
     RGA mass-current panels whose values span several orders of magnitude.
-
-    ``zero_line`` draws a y=0 reference on every subplot -- for flux panels,
-    where the sign carries the meaning (efflux above the line, uptake below)
-    and the eye needs the crossing point.
+    An optional fifth element (default False) draws a y=0 reference on that
+    subplot only -- for panels where the sign carries the meaning (flux
+    efflux/uptake, or a mesocosm-minus-chamber difference) and the eye needs
+    the crossing point; other subplots in the same figure are unaffected.
 
     ``chamber_spans`` (see active_chamber_spans) shades the background by
-    which chamber was being sampled at that time.
+    which chamber was being sampled at that time, on every subplot.
     """
-    sections = [(label, traces, sci, log_y) for label, traces, sci, log_y in sections if traces]
+    sections = [(*s, False)[:5] for s in sections if s[1]]
     if not sections:
         return
-    fig = make_subplots(rows=len(sections), cols=1, shared_xaxes=True, subplot_titles=[label for label, _, _, _ in sections])
-    for i, (_label, traces, sci, log_y) in enumerate(sections, start=1):
+    fig = make_subplots(rows=len(sections), cols=1, shared_xaxes=True, subplot_titles=[label for label, *_ in sections])
+    for i, (_label, traces, sci, log_y, zero_line) in enumerate(sections, start=1):
         for trace in traces:
             fig.add_trace(trace, row=i, col=1)
         if sci:
@@ -756,6 +771,41 @@ def _par_daily_sections(par: pl.DataFrame) -> list[tuple[str, list, bool, bool]]
     ]
 
 
+def _hobo_mesocosm_diff_section(
+    hobo: pl.DataFrame, location_colors: dict[str, str]
+) -> tuple[str, list[go.Scatter], bool, bool, bool] | None:
+    """Mesocosm minus chamber oxygen over the whole deployment, computed from the two
+    HOBO series directly (the only pair of co-located, same-instrument-type oxygen
+    readings -- SCALUP has no mesocosm counterpart to diff against), joined by
+    nearest timestamp since the loggers aren't perfectly synchronized.
+    """
+    locations = hobo["location"].unique().to_list()
+    if "mesocosm" not in locations:
+        return None
+    chambers = sorted(loc for loc in locations if loc != "mesocosm")
+    mesocosm = hobo.filter(pl.col("location") == "mesocosm").sort("ts").select(
+        "ts", pl.col("oxygen_mgl").alias("mesocosm_oxygen_mgl")
+    )
+    diff_traces = []
+    for chamber in chambers:
+        hobo_c = hobo.filter(pl.col("location") == chamber).sort("ts")
+        if hobo_c.is_empty():
+            continue
+        joined = hobo_c.join_asof(mesocosm, on="ts", strategy="nearest")
+        diff_traces.append(
+            go.Scatter(
+                x=joined["ts"],
+                y=joined["mesocosm_oxygen_mgl"] - joined["oxygen_mgl"],
+                mode="lines",
+                name=chamber,
+                line={"color": location_colors[chamber]},
+            )
+        )
+    if not diff_traces:
+        return None
+    return ("Mesocosm minus chamber oxygen (HOBO, mg/L)", diff_traces, False, False, True)
+
+
 def render_measurements_tab(
     tables: dict[str, pl.DataFrame | None],
     partial_pressure_sensitivity: float,
@@ -819,16 +869,28 @@ def render_measurements_tab(
                 sections.append(("Masses / mass 40 (chamber-cycle-averaged)", ratio_traces, False, True))
 
     scalup = tables["scalup"]
+    scalup_oxygen_trace = None
     if scalup is None or scalup.is_empty():
         _empty_state("scalup")
     else:
         cols_lower = {c.lower(): c for c in scalup.columns}
         for col, label in _SCALUP_PANELS:
             actual_col = cols_lower.get(col.lower())
-            if actual_col is not None:
-                sections.append(
-                    (label, [go.Scatter(x=scalup["ts"], y=scalup[actual_col], mode="lines", name=col)], False, False)
-                )
+            if actual_col is None:
+                continue
+            line = {"color": _SCALUP_OXYGEN_COLOR} if col == "oxygen_mgL" else {}
+            sections.append(
+                (label, [go.Scatter(x=scalup["ts"], y=scalup[actual_col], mode="lines", name=col, line=line)], False, False)
+            )
+        oxygen_col = cols_lower.get("oxygen_mgl")
+        if oxygen_col is not None:
+            scalup_oxygen_trace = go.Scatter(
+                x=scalup["ts"],
+                y=scalup[oxygen_col],
+                mode="lines",
+                name="SCALUP oxygen_mgl",
+                line={"color": _SCALUP_OXYGEN_COLOR},
+            )
 
     par = tables["par"]
     if par is None or par.is_empty():
@@ -854,6 +916,45 @@ def render_measurements_tab(
         )
         sections += _par_daily_sections(par)
 
+    hobo = tables["hobo_oxygen"]
+    if hobo is None or hobo.is_empty():
+        _empty_state("HOBO oxygen")
+    else:
+        location_colors = _hobo_location_colors(hobo)
+        oxygen_traces = [
+            go.Scatter(
+                x=hobo.filter(pl.col("location") == loc)["ts"],
+                y=hobo.filter(pl.col("location") == loc)["oxygen_mgl"],
+                mode="lines",
+                name=loc,
+                line={"color": color},
+            )
+            for loc, color in location_colors.items()
+        ]
+        if scalup_oxygen_trace is not None:
+            oxygen_traces.append(scalup_oxygen_trace)
+        sections.append(("HOBO + SCALUP oxygen (mg/L)", oxygen_traces, False, False))
+        sections.append(
+            (
+                "HOBO temperature (degC)",
+                [
+                    go.Scatter(
+                        x=hobo.filter(pl.col("location") == loc)["ts"],
+                        y=hobo.filter(pl.col("location") == loc)["temp_degc"],
+                        mode="lines",
+                        name=loc,
+                        line={"color": color},
+                    )
+                    for loc, color in location_colors.items()
+                ],
+                False,
+                False,
+            )
+        )
+        diff_section = _hobo_mesocosm_diff_section(hobo, location_colors)
+        if diff_section is not None:
+            sections.append(diff_section)
+
     _render_linked_timeseries(sections, title="Measurements", chamber_spans=chamber_spans)
 
 
@@ -866,6 +967,7 @@ def _render_experiment_full_data(
     scalup: pl.DataFrame | None,
     status: pl.DataFrame | None,
     valve: pl.DataFrame,
+    hobo: pl.DataFrame | None,
     total_pressure_sensitivity: float,
     time_range: tuple[datetime, datetime] | None = None,
 ) -> None:
@@ -972,6 +1074,78 @@ def _render_experiment_full_data(
         file_name=f"experiment_{experiment}_{download_name}.csv",
         mime="text/csv",
     )
+
+    _render_experiment_hobo_oxygen(
+        hobo, exp_scalup if have_scalup else None, exp_windows, experiment, experiment_start
+    )
+
+
+def _render_experiment_hobo_oxygen(
+    hobo: pl.DataFrame | None,
+    exp_scalup: pl.DataFrame | None,
+    exp_windows: pl.DataFrame,
+    experiment: str,
+    experiment_start: datetime,
+) -> None:
+    """HOBO (+ SCALUP) oxygen per chamber against the mesocosm reference.
+
+    See _render_hobo_mesocosm_diff (Measurements tab) for the mesocosm-minus-chamber
+    difference plot -- that one covers the whole deployment rather than one experiment.
+    """
+    if hobo is None or hobo.is_empty():
+        _empty_state("HOBO oxygen")
+        return
+
+    experiment_end = exp_windows["window_end"].max()
+    exp_hobo = hobo.filter((pl.col("ts") >= experiment_start) & (pl.col("ts") < experiment_end)).with_columns(
+        ((pl.col("ts") - experiment_start).dt.total_seconds() / 60).alias("elapsed_time_min")
+    )
+    if exp_hobo.is_empty():
+        st.info("No HOBO oxygen readings in this experiment's time range.")
+        return
+
+    locations = exp_hobo["location"].unique().to_list()
+    chambers = sorted(loc for loc in locations if loc != "mesocosm")
+    colors = _hobo_location_colors(exp_hobo)
+    mesocosm_df = exp_hobo.filter(pl.col("location") == "mesocosm").sort("ts") if "mesocosm" in locations else None
+
+    sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
+    for chamber in chambers:
+        hobo_c = exp_hobo.filter(pl.col("location") == chamber)
+        traces = [
+            go.Scatter(
+                x=hobo_c["elapsed_time_min"],
+                y=hobo_c["oxygen_mgl"],
+                mode="lines",
+                name=f"{chamber} HOBO",
+                line={"color": colors[chamber]},
+            )
+        ]
+        if exp_scalup is not None:
+            scalup_c = exp_scalup.filter(pl.col("chamber") == chamber)
+            if not scalup_c.is_empty():
+                traces.append(
+                    go.Scatter(
+                        x=(scalup_c["ts"] - experiment_start).dt.total_seconds() / 60,
+                        y=scalup_c["oxygen_mgl"],
+                        mode="lines",
+                        name=f"{chamber} SCALUP",
+                        line={"color": colors[chamber], "dash": "dash"},
+                    )
+                )
+        if mesocosm_df is not None and not mesocosm_df.is_empty():
+            traces.append(
+                go.Scatter(
+                    x=mesocosm_df["elapsed_time_min"],
+                    y=mesocosm_df["oxygen_mgl"],
+                    mode="lines",
+                    name="mesocosm HOBO",
+                    line={"color": colors["mesocosm"], "dash": "dot"},
+                )
+            )
+        sections.append((f"{chamber} oxygen (mg/L)", traces, False, False))
+
+    _render_linked_timeseries(sections, title=f"Experiment {experiment}: oxygen vs mesocosm")
 
 
 def _render_experiment_cycle_averages(
@@ -1188,7 +1362,7 @@ def _render_flux_over_time(all_fluxes: pl.DataFrame) -> None:
     units = flux_variable_units(all_fluxes)
     chambers = sorted(all_fluxes["chamber"].unique().to_list())
     colors = chamber_color_map(chambers)
-    sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
+    sections: list[tuple[str, list[go.Scatter], bool, bool, bool]] = []
     for variable in [v for v in variables if v in selected]:
         g = all_fluxes.filter(pl.col("variable") == variable).sort("experiment_start")
         traces = []
@@ -1215,8 +1389,8 @@ def _render_flux_over_time(all_fluxes: pl.DataFrame) -> None:
                     hovertemplate="%{text}<br>%{x}<br>flux=%{y:.4g}<extra></extra>",
                 )
             )
-        sections.append((f"{variable} ({units[variable]})", traces, False, False))
-    _render_linked_timeseries(sections, title="Flux over time", zero_line=True)
+        sections.append((f"{variable} ({units[variable]})", traces, False, False, True))
+    _render_linked_timeseries(sections, title="Flux over time")
 
 
 _SETTLED_OUT_COLOR = "#B0B0B0"
@@ -1329,6 +1503,7 @@ def render_experiment_tab(
     scalup = tables["scalup"]
     status = tables["status"]
     valve = tables["valve"]
+    hobo = tables["hobo_oxygen"]
 
     if valve is None or valve.is_empty():
         _empty_state("experiment")
@@ -1337,7 +1512,7 @@ def render_experiment_tab(
     grain = st.radio("Grain", ["Full data", "Cycle averages"], horizontal=True, key="experiment_grain")
 
     if grain == "Full data":
-        _render_experiment_full_data(rga, scalup, status, valve, total_pressure_sensitivity, time_range)
+        _render_experiment_full_data(rga, scalup, status, valve, hobo, total_pressure_sensitivity, time_range)
     else:
         _render_experiment_cycle_averages(
             rga, scalup, status, valve, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2, time_range
