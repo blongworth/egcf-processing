@@ -31,11 +31,13 @@ RAW_CURRENT_AMPS_PER_COUNT = 1e-16
 # that nominal value. Total-pressure default is this instrument's supplied
 # sensitivity, 0.0134 mA/Torr (1.34e-5 A/Torr). Pass measured values in to
 # override either.
-DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR = 2e-4
+DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR = 8.01e-5
 DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = 1.34e-5
 
 
-def match_readings_to_windows(readings: pl.DataFrame, windows: pl.DataFrame, ts_col: str = "ts") -> pl.DataFrame:
+def match_readings_to_windows(
+    readings: pl.DataFrame, windows: pl.DataFrame, ts_col: str = "ts"
+) -> pl.DataFrame:
     """Match each reading to the window whose [window_start, window_end) it falls in.
 
     join_asof(backward) finds the latest window_start at or before the
@@ -48,14 +50,18 @@ def match_readings_to_windows(readings: pl.DataFrame, windows: pl.DataFrame, ts_
     rest.
     """
     if windows.is_empty():
-        return readings.clear().with_columns(window_start=pl.lit(None, dtype=pl.Datetime))
+        return readings.clear().with_columns(
+            window_start=pl.lit(None, dtype=pl.Datetime)
+        )
     matched = readings.sort(ts_col).join_asof(
         windows.sort("window_start"),
         left_on=ts_col,
         right_on="window_start",
         strategy="backward",
     )
-    return matched.filter(pl.col("window_start").is_not_null() & (pl.col(ts_col) < pl.col("window_end")))
+    return matched.filter(
+        pl.col("window_start").is_not_null() & (pl.col(ts_col) < pl.col("window_end"))
+    )
 
 
 def _empty_float_cols(windows: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
@@ -72,7 +78,9 @@ def _aggregate_rga(
     matched = match_readings_to_windows(rga, windows)
     if matched.is_empty():
         return windows.select("window_start")
-    grouped = matched.group_by(["window_start", "mass"]).agg(pl.col("current").mean().alias("current"))
+    grouped = matched.group_by(["window_start", "mass"]).agg(
+        pl.col("current").mean().alias("current")
+    )
     pivoted = grouped.pivot(index="window_start", on="mass", values="current")
     masses = [c for c in pivoted.columns if c != "window_start"]
     pivoted = pivoted.rename({m: f"mass_{m}_avg" for m in masses})
@@ -80,7 +88,9 @@ def _aggregate_rga(
     for m in masses:
         amps = pl.col(f"mass_{m}_avg") * RAW_CURRENT_AMPS_PER_COUNT
         derived.append(amps.alias(f"mass_{m}_amps"))
-        derived.append((amps / partial_pressure_sensitivity_a_per_torr).alias(f"mass_{m}_torr"))
+        derived.append(
+            (amps / partial_pressure_sensitivity_a_per_torr).alias(f"mass_{m}_torr")
+        )
     return pivoted.with_columns(derived)
 
 
@@ -142,7 +152,9 @@ def aggregate_onto_windows(
     """Average rga/scalup/status/par readings onto each window and join with window context."""
     rga_agg = _aggregate_rga(rga, windows, partial_pressure_sensitivity_a_per_torr)
     scalup_agg = _aggregate_scalup(scalup, windows)
-    status_agg = _aggregate_status(status, windows, total_pressure_sensitivity_a_per_torr)
+    status_agg = _aggregate_status(
+        status, windows, total_pressure_sensitivity_a_per_torr
+    )
     par_agg = _aggregate_par(par, windows)
 
     result = (
@@ -157,7 +169,9 @@ def aggregate_onto_windows(
     masses = sorted(
         {int(c.split("_")[1]) for c in rga_agg.columns if c.startswith("mass_")}
     )
-    mass_cols = [f"mass_{m}_{suffix}" for m in masses for suffix in ("avg", "amps", "torr")]
+    mass_cols = [
+        f"mass_{m}_{suffix}" for m in masses for suffix in ("avg", "amps", "torr")
+    ]
     final_cols = (
         ["timestamp", "experiment_number", "elapsed_time", "chamber"]
         + mass_cols
