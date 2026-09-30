@@ -463,11 +463,11 @@ check to repeat on each new deployment.
   each mass gets `mass_{m}_avg` (raw count, unchanged, kept for backward compatibility),
   `mass_{m}_amps`, and `mass_{m}_torr` (amps divided by a partial-pressure sensitivity in A/Torr);
   total pressure gets `total_pressure_amps` and `total_pressure_torr` (same pattern, using a
-  total-pressure sensitivity). The sensitivity defaults
-  (`DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR` / `DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR`,
-  both `2e-4`) come from the RGAm.pdf specifications table's nominal Faraday-cup sensitivity (measured
-  with N2 @ 28 amu) — **not** this specific instrument's factory-calibrated `SP`/`ST` values, which
-  aren't recoverable from the SD-card logs. Treat the Torr columns as approximate unless overridden
+  total-pressure sensitivity). `DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR` (`2e-4`) is the
+  RGAm.pdf specifications table's nominal Faraday-cup sensitivity (measured with N2 @ 28 amu) —
+  **not** this instrument's factory-calibrated `SP`, which isn't recoverable from the SD-card logs.
+  `DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR` (`1.34e-5`) is this instrument's supplied
+  total-pressure sensitivity, 0.0134 mA/Torr. Treat the partial-pressure Torr columns as approximate unless overridden
   with a measured sensitivity via `pipeline.run(...)`'s `partial_pressure_sensitivity_a_per_torr`/
   `total_pressure_sensitivity_a_per_torr` params or the CLI's `--partial-pressure-sensitivity`/
   `--total-pressure-sensitivity` flags.

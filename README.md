@@ -27,8 +27,9 @@ uv run main.py <raw_dir> --out-dir <out_dir> [--settle-offset-s 60] [--format pa
 - `--settle-offset-s`: seconds excluded from the start of each chamber cycle before averaging (default 60).
 - `--format`: `parquet` (default) or `csv`.
 - `--partial-pressure-sensitivity` / `--total-pressure-sensitivity`: override the RGA A/Torr
-  sensitivity used to convert ion current to pressure (defaults are nominal spec values, not this
-  instrument's factory calibration).
+  sensitivity used to convert ion current to pressure (partial default is the nominal
+  spec value 2e-4 A/Torr, not this instrument's factory calibration; total default is this
+  instrument's 0.0134 mA/Torr = 1.34e-5 A/Torr).
 
 This writes four combined raw tables (`status`, `rga`, `scalup`, `valve`) plus two derived,
 aggregated tables: `egcf_rga_scans` (one row per RGA mass-scan cycle) and `egcf_chamber_cycles`

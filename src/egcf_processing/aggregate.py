@@ -24,14 +24,15 @@ _STATUS_COLS = [
 # Amps, and transmitted directly in Hex format").
 RAW_CURRENT_AMPS_PER_COUNT = 1e-16
 
-# Nominal Faraday-cup partial/total pressure sensitivity from the RGAm.pdf
-# specifications table ("Sensitivity (A/Torr)*: 2e-4 (FC) ... Measured with
-# N2 @ 28 amu ..."). This head's actual factory-calibrated SP/ST sensitivity
-# isn't recoverable from the SD-card logs, so partial/total pressure in Torr
-# is only as accurate as this nominal value -- pass a measured sensitivity
-# in if one is available.
+# Partial-pressure default is the nominal Faraday-cup sensitivity from the
+# RGAm.pdf specifications table ("Sensitivity (A/Torr)*: 2e-4 (FC) ... Measured
+# with N2 @ 28 amu ..."); this head's factory-calibrated SP isn't recoverable
+# from the SD-card logs, so partial pressure in Torr is only as accurate as
+# that nominal value. Total-pressure default is this instrument's supplied
+# sensitivity, 0.0134 mA/Torr (1.34e-5 A/Torr). Pass measured values in to
+# override either.
 DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR = 2e-4
-DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = 2e-4
+DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR = 1.34e-5
 
 
 def match_readings_to_windows(readings: pl.DataFrame, windows: pl.DataFrame, ts_col: str = "ts") -> pl.DataFrame:
