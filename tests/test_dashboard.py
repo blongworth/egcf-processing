@@ -10,6 +10,8 @@ from egcf_processing.combine import SCALUP_SCHEMA, STATUS_SCHEMA, VALVE_SCHEMA
 from egcf_processing.metabolism import METABOLISM_SCHEMA, PI_FIT_SCHEMA
 from egcf_processing.par import PAR_SCHEMA
 from egcf_processing.dashboard import (
+    _hobo_location_colors,
+    _hobo_mesocosm_diff_section,
     active_chamber_spans,
     align_slider_bounds,
     date_range_bounds,
@@ -407,11 +409,13 @@ def test_hobo_oxygen_comparison_and_mesocosm_diff_plots(tmp_path):
                 datetime(2026, 1, 1, 0, 1, 0),
                 datetime(2026, 1, 1, 0, 0, 0),
                 datetime(2026, 1, 1, 0, 1, 0),
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 0, 1, 0),
             ],
-            "location": ["C1", "C1", "mesocosm", "mesocosm"],
-            "oxygen_mgl": [8.5, 8.4, 9.0, 9.0],
-            "temp_degc": [20.0, 20.0, 20.0, 20.0],
-            "serial_number": ["1", "1", "2", "2"],
+            "location": ["C1", "C1", "mesocosm", "mesocosm", "ambient", "ambient"],
+            "oxygen_mgl": [8.5, 8.4, 9.0, 9.0, 9.5, 9.5],
+            "temp_degc": [20.0] * 6,
+            "serial_number": ["1", "1", "2", "2", "3", "3"],
         }
     )
     hobo_df.write_parquet(tmp_path / "hobo_oxygen.parquet")
@@ -424,12 +428,30 @@ def test_hobo_oxygen_comparison_and_mesocosm_diff_plots(tmp_path):
     experiment_specs = [c.proto.spec for c in at.tabs[2].get("plotly_chart")]
     assert any("oxygen vs mesocosm" in spec for spec in experiment_specs)
     assert not any("mesocosm minus chamber oxygen" in spec for spec in experiment_specs)
+    experiment_traces = [d["name"] for spec in experiment_specs for d in json.loads(spec)["data"]]
+    assert "ambient HOBO" in experiment_traces
+    assert "ambient oxygen (mg/L)" not in " ".join(experiment_specs)
 
     measurements_specs = [c.proto.spec for c in at.tabs[1].get("plotly_chart")]
     combined_measurements_spec = " ".join(measurements_specs)
     assert "Mesocosm minus chamber oxygen" in combined_measurements_spec
     assert "HOBO + SCALUP oxygen" in combined_measurements_spec
     assert "SCALUP oxygen_mgl" in combined_measurements_spec
+
+
+def test_ambient_hobo_is_a_reference_not_a_chamber():
+    hobo = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, m) for m in (0, 1)] * 3,
+            "location": ["C1", "C1", "mesocosm", "mesocosm", "ambient", "ambient"],
+            "oxygen_mgl": [8.5, 8.4, 9.0, 9.0, 9.5, 9.5],
+        }
+    )
+    colors = _hobo_location_colors(hobo)
+    assert set(colors) == {"C1", "mesocosm", "ambient"}
+    assert colors["ambient"] != colors["C1"]
+    _label, traces, *_ = _hobo_mesocosm_diff_section(hobo, colors)
+    assert [t.name for t in traces] == ["C1"]
 
 
 def test_flux_variable_units():

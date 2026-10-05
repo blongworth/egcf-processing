@@ -17,17 +17,28 @@ since column count/position varies (some exports carry an extra "Sensor Data
 Error" event column). Temperature is reported in Fahrenheit. Trailing rows
 near logger retrieval carry the ``-888.88`` out-of-water/error sentinel or are
 blank with only a stop/retrieval event flag set; both are dropped.
+
+Any plot title other than C1, C2 or mesocosm (e.g. a dated deployment name like
+"EGFC_10012026") is a logger outside the chambers and mesocosm, so its location
+is recorded as "ambient"; the original title is logged, and the serial number
+still identifies the logger.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import logging
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
+
+KNOWN_LOCATIONS = ("C1", "C2", "mesocosm")
+AMBIENT_LOCATION = "ambient"
 
 HOBO_SCHEMA = {
     "ts": pl.Datetime,
@@ -84,6 +95,15 @@ def read_hobo_file(path: Path) -> pl.DataFrame:
 
     title_match = _PLOT_TITLE_RE.search(lines[0])
     location = title_match.group(1).strip() if title_match else None
+    if location not in KNOWN_LOCATIONS:
+        logger.info(
+            "%s: HOBO plot title %r is not one of %s; treating it as %s",
+            path.name,
+            location,
+            KNOWN_LOCATIONS,
+            AMBIENT_LOCATION,
+        )
+        location = AMBIENT_LOCATION
 
     header = lines[1]
     header_fields = next(csv.reader(io.StringIO(header)))

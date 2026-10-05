@@ -26,6 +26,7 @@ from egcf_processing.aggregate import (
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
 from egcf_processing.cycles import chamber_cycle_windows
 from egcf_processing.flux import compute_fluxes, linear_fit
+from egcf_processing.hobo import AMBIENT_LOCATION
 from egcf_processing.metabolism import fit_pi_curves, jassby_platt
 from egcf_processing.par import DEFAULT_MIN_DAY_COVERAGE, daily_max_trend, daily_par
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
@@ -268,18 +269,22 @@ def chamber_color_map(chambers: list[str]) -> dict[str, str]:
 
 
 _MESOCOSM_COLOR = "#B0B0B0"
+_AMBIENT_COLOR = "#707070"
+_HOBO_REFERENCE_COLORS = {"mesocosm": _MESOCOSM_COLOR, AMBIENT_LOCATION: _AMBIENT_COLOR}
 _SCALUP_OXYGEN_COLOR = _MASS_COLOR_PALETTE[2]
 
 
 def _hobo_location_colors(hobo: pl.DataFrame) -> dict[str, str]:
-    """Chamber locations get chamber_color_map's colors; mesocosm gets a fixed gray,
-    matching its role as a reference series rather than a chamber."""
+    """Chamber locations get chamber_color_map's colors; mesocosm and ambient get fixed
+    grays, matching their role as reference series rather than chambers."""
     locations = sorted(hobo["location"].unique().to_list())
-    chambers = [loc for loc in locations if loc != "mesocosm"]
-    colors = chamber_color_map(chambers)
-    if "mesocosm" in locations:
-        colors["mesocosm"] = _MESOCOSM_COLOR
+    colors = chamber_color_map(_hobo_chambers(locations))
+    colors.update({loc: c for loc, c in _HOBO_REFERENCE_COLORS.items() if loc in locations})
     return {loc: colors[loc] for loc in locations}
+
+
+def _hobo_chambers(locations: list[str]) -> list[str]:
+    return sorted(loc for loc in locations if loc not in _HOBO_REFERENCE_COLORS)
 
 
 def flux_variable_units(fluxes: pl.DataFrame) -> dict[str, str]:
@@ -922,7 +927,7 @@ def _hobo_mesocosm_diff_section(
     locations = hobo["location"].unique().to_list()
     if "mesocosm" not in locations:
         return None
-    chambers = sorted(loc for loc in locations if loc != "mesocosm")
+    chambers = _hobo_chambers(locations)
     mesocosm = hobo.filter(pl.col("location") == "mesocosm").sort("ts").select(
         "ts", pl.col("oxygen_mgl").alias("mesocosm_oxygen_mgl")
     )
@@ -1227,7 +1232,7 @@ def _render_experiment_hobo_oxygen(
     experiment: str,
     experiment_start: datetime,
 ) -> None:
-    """HOBO (+ SCALUP) oxygen per chamber against the mesocosm reference.
+    """HOBO (+ SCALUP) oxygen per chamber against the mesocosm and ambient references.
 
     See _render_hobo_mesocosm_diff (Measurements tab) for the mesocosm-minus-chamber
     difference plot -- that one covers the whole deployment rather than one experiment.
@@ -1245,9 +1250,13 @@ def _render_experiment_hobo_oxygen(
         return
 
     locations = exp_hobo["location"].unique().to_list()
-    chambers = sorted(loc for loc in locations if loc != "mesocosm")
+    chambers = _hobo_chambers(locations)
     colors = _hobo_location_colors(exp_hobo)
-    mesocosm_df = exp_hobo.filter(pl.col("location") == "mesocosm").sort("ts") if "mesocosm" in locations else None
+    references = {
+        loc: exp_hobo.filter(pl.col("location") == loc).sort("ts")
+        for loc in _HOBO_REFERENCE_COLORS
+        if loc in locations
+    }
 
     sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
     for chamber in chambers:
@@ -1273,16 +1282,16 @@ def _render_experiment_hobo_oxygen(
                         line={"color": colors[chamber], "dash": "dash"},
                     )
                 )
-        if mesocosm_df is not None and not mesocosm_df.is_empty():
-            traces.append(
-                go.Scatter(
-                    x=mesocosm_df["elapsed_time_min"],
-                    y=mesocosm_df["oxygen_mgl"],
-                    mode="lines",
-                    name="mesocosm HOBO",
-                    line={"color": colors["mesocosm"], "dash": "dot"},
-                )
+        traces += [
+            go.Scatter(
+                x=ref["elapsed_time_min"],
+                y=ref["oxygen_mgl"],
+                mode="lines",
+                name=f"{loc} HOBO",
+                line={"color": colors[loc], "dash": "dot"},
             )
+            for loc, ref in references.items()
+        ]
         sections.append((f"{chamber} oxygen (mg/L)", traces, False, False))
 
     _render_linked_timeseries(sections, title=f"Experiment {experiment}: oxygen vs mesocosm")

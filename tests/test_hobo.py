@@ -82,3 +82,10 @@ def test_read_all_hobo_concatenates_locations(tmp_path):
     df = read_all_hobo([c1, mesocosm])
     assert sorted(df["location"].unique().to_list()) == ["C1", "mesocosm"]
     assert df.height == 4
+
+
+def test_read_hobo_file_treats_unknown_plot_title_as_ambient(tmp_path):
+    header = MESOCOSM_HEADER.replace("Plot Title: mesocosm", "Plot Title: EGFC_10012026")
+    df = read_hobo_file(_write(tmp_path / "EGFC_10012026.csv", header, MESOCOSM_ROWS))
+    assert df["location"].unique().to_list() == ["ambient"]
+    assert df["serial_number"].unique().to_list() == ["20601917"]
