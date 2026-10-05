@@ -958,7 +958,12 @@ def render_measurements_tab(
         _empty_state("RGA")
     else:
         options = [label for label, available in [("Full RGA data", have_full), ("Chamber cycle averages", have_cycles)] if available]
-        data_source = st.radio("RGA data source", options, horizontal=True, key="rga_data_source")
+        # Cycle averages by default: plotting every raw RGA reading over a long
+        # range costs over a GB of server memory, too much for a hosted app.
+        default_source = options.index("Chamber cycle averages") if have_cycles else 0
+        data_source = st.radio(
+            "RGA data source", options, index=default_source, horizontal=True, key="rga_data_source"
+        )
 
         if data_source == "Full RGA data":
             masses = sorted(rga["mass"].unique().to_list())

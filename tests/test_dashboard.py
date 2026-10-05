@@ -903,9 +903,14 @@ def test_measurements_tab_rga_data_source_control(tmp_path):
     tab = at.tabs[1]
     data_source_radio = [r for r in tab.get("radio") if r.label == "RGA data source"][0]
     assert data_source_radio.options == ["Full RGA data", "Chamber cycle averages"]
+    assert data_source_radio.value == "Chamber cycle averages"
+    titles = [a["text"] for a in json.loads(tab.get("plotly_chart")[0].proto.spec)["layout"]["annotations"]]
+    assert "Masses / mass 40 (chamber-cycle-averaged)" in titles
 
-    data_source_radio.set_value("Chamber cycle averages").run(timeout=60)
+    data_source_radio.set_value("Full RGA data").run(timeout=60)
     assert not at.exception
+    titles = [a["text"] for a in json.loads(at.tabs[1].get("plotly_chart")[0].proto.spec)["layout"]["annotations"]]
+    assert "Masses / mass 40 (full)" in titles
 
 
 def _write_status(tmp_path):

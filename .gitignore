@@ -9,8 +9,22 @@ wheels/
 # Virtual environments
 .venv
 
-# Data (raw and processed) -- not tracked in git
+# Data (raw and processed) -- not tracked in git, except the snapshot the
+# deployed dashboard reads: only the Parquet tables dashboard.py uses.
 /data/*
+!/data/processed/
+/data/processed/*
+!/data/processed/surface/
+/data/processed/surface/*
+!/data/processed/surface/status.parquet
+!/data/processed/surface/system_health.parquet
+!/data/processed/surface/rga.parquet
+!/data/processed/surface/scalup.parquet
+!/data/processed/surface/valve.parquet
+!/data/processed/surface/par.parquet
+!/data/processed/surface/hobo_oxygen.parquet
+!/data/processed/surface/egcf_chamber_cycles.parquet
+!/data/processed/surface/egcf_pi_fit.parquet
 
 # OS cruft
 .DS_Store

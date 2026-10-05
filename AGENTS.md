@@ -707,7 +707,9 @@ normalize against.
 
 The Measurements tab's RGA panels are driven by one "RGA data source" radio
 (`Full RGA data` / `Chamber cycle averages`, only offering a source that's
-actually present in the loaded dataset) — there is deliberately no separate
+actually present in the loaded dataset, defaulting to cycle averages when
+they're present because drawing all ~2.2 M raw readings over the full
+deployment peaks above 1.5 GB of server memory) — there is deliberately no separate
 RGA-cycle-averaged panel; that grain is only exposed via the Rates and Fluxes
 tab's own grain toggle. Full RGA data renders as lines; chamber-cycle
 averages render as points (`mode="markers"`), since each point is one
