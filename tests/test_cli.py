@@ -1,9 +1,11 @@
 import polars as pl
 import pytest
 
+from egcf_processing import cli
 from egcf_processing.cli import main
 
-# Placeholder chamber geometry -- required flags, exercising flux arithmetic only.
+# Placeholder chamber geometry, overriding the defaults to exercise the flags.
+# The values only test the flux arithmetic.
 GEOMETRY = ["--chamber-volume-l", "4.0", "--chamber-area-m2", "0.06"]
 
 # Two 10s-long cycles: short enough that the default 60s settle offset drops
@@ -35,6 +37,13 @@ def test_main_uses_default_settle_offset_and_parquet_format(tmp_path):
     # default settle_offset_s (60s) drops both 10s-long cycles as too-short.
     assert (out_dir / "egcf_chamber_cycles.parquet").exists()
     assert pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet").is_empty()
+
+
+def test_main_chamber_geometry_defaults_to_30_l_over_0_30_m2(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "run", lambda *args, **kwargs: seen.update(kwargs))
+    main([str(tmp_path), "--out-dir", str(tmp_path / "processed")])
+    assert (seen["chamber_volume_l"], seen["chamber_area_m2"]) == (30.0, 0.30)
 
 
 def test_main_settle_offset_flag_reaches_pipeline(tmp_path):

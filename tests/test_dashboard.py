@@ -576,7 +576,7 @@ def test_experiment_flux_bar_chart_has_one_subplot_per_variable(tmp_path):
     assert at.tabs[2].dataframe  # exact numbers still available underneath
 
 
-def test_experiment_tab_flux_table_needs_chamber_geometry(tmp_path):
+def test_experiment_tab_flux_table_uses_default_chamber_geometry(tmp_path):
     # Same two-C1-cycle setup as the fit/rates test, plus scalup oxygen so
     # there's a flux to compute once geometry is supplied.
     valve_df = pl.DataFrame(
@@ -610,14 +610,7 @@ def test_experiment_tab_flux_table_needs_chamber_geometry(tmp_path):
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     at.tabs[2].radio(key="experiment_grain").set_value("Cycle averages").run(timeout=60)
     assert not at.exception
-    # Geometry defaults to 0, so the flux table is replaced by a prompt.
-    assert not at.tabs[2].dataframe
-    assert any("chamber volume" in info.value for info in at.tabs[2].info)
-
-    at.sidebar.number_input[2].set_value(4.0).run(timeout=60)
-    at.sidebar.number_input[3].set_value(0.06).run(timeout=60)
-    assert not at.exception
-
+    # Geometry defaults to 30 L over 0.30 m^2.
     tables = at.tabs[2].dataframe
     assert len(tables) == 1
     flux_table = pl.from_pandas(tables[0].value)
@@ -625,7 +618,13 @@ def test_experiment_tab_flux_table_needs_chamber_geometry(tmp_path):
     oxygen = flux_table.filter(pl.col("variable") == "oxygen")
     # 8.0 -> 7.0 mg/L over the 10 min between the two cycles' window starts.
     assert oxygen["slope_native_per_min"][0] == pytest.approx(-0.1)
-    assert oxygen["output_value"][0] == pytest.approx(-0.1 * (1 / 32) * 4.0 / 0.06 * 60)
+    assert oxygen["output_value"][0] == pytest.approx(-0.1 * (1 / 32) * 30.0 / 0.30 * 60)
+
+    # Zeroing either dimension replaces the flux table with a prompt.
+    at.sidebar.number_input[2].set_value(0.0).run(timeout=60)
+    assert not at.exception
+    assert not at.tabs[2].dataframe
+    assert any("chamber volume" in info.value for info in at.tabs[2].info)
 
 
 def test_experiment_tab_full_data_grain_shows_experiment_start_subtitle(tmp_path):

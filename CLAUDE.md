@@ -22,7 +22,7 @@ uv sync                            # install deps
 uv run pytest -q                   # run the full test suite
 uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
-uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
+uv run main.py <raw_dir> --out-dir <out_dir> [--chamber-volume-l 30] [--chamber-area-m2 0.30] \
     [--settle-offset-s 60] [--format parquet|csv] \
     [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>] \
     [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0] \
@@ -69,7 +69,7 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
    `(chamber, Re)` to the next transition), averaged over `[cycle_start + settle_offset, next_transition)`.
 4. **Layer D (`egcf_fluxes`)** — one row per `(experiment_number, chamber, variable)`: benthic vertical
    flux (`dC/dt * V/A`, in µmol m⁻² h⁻¹) fit from Layer C's cycle averages. Chamber volume and area
-   are required inputs with no default. Each flux row also carries the mean and integrated PAR over
+   default to 30 L and 0.30 m² (`--chamber-volume-l`/`--chamber-area-m2`). Each flux row also carries the mean and integrated PAR over
    its whole experiment (`par_mean_umol_m2_s`, `par_integrated_mol_m2`, `par_coverage`).
 5. **Layer E (`egcf_metabolism`, `egcf_pi_fit`)** — each O2 flux classified light/dark by mean PAR,
    with R, NCP, and GPP, plus a per-chamber Jassby–Platt P–I fit (Pmax, α, R, Ik). Excluded

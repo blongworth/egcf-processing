@@ -6,7 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 from egcf_processing.pipeline import (
+    DEFAULT_CHAMBER_AREA_M2,
     DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
+    DEFAULT_CHAMBER_VOLUME_L,
     DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
     DEFAULT_METABOLISM_MIN_R2,
     DEFAULT_MIN_PAR_COVERAGE,
@@ -42,13 +44,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--chamber-volume-l",
         type=float,
-        required=True,
+        default=DEFAULT_CHAMBER_VOLUME_L,
         help="Chamber enclosed water volume in liters (same for C1 and C2), used to scale flux",
     )
     parser.add_argument(
         "--chamber-area-m2",
         type=float,
-        required=True,
+        default=DEFAULT_CHAMBER_AREA_M2,
         help="Sediment footprint area enclosed by the chamber base in m^2 (same for C1 and C2)",
     )
     parser.add_argument(

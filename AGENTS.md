@@ -61,9 +61,10 @@ just accepting whatever the (possibly buggy) code produces.
 `tests/test_cli.py` covers `cli.py`'s argparse wiring specifically -- that each
 flag (`--settle-offset-s`, `--format`, `--partial-pressure-sensitivity`,
 `--total-pressure-sensitivity`) actually reaches `pipeline.run()` and changes
-its output accordingly, that the required `--chamber-volume-l`/`--chamber-area-m2`
-flags are supplied (via the shared `GEOMETRY` list -- placeholder values that
-exercise the flux arithmetic, not real EGFC dimensions), and that the argparse defaults match `pipeline`'s
+its output accordingly, that the `--chamber-volume-l`/`--chamber-area-m2`
+defaults (30 L, 0.30 m²) reach `pipeline.run()` and are overridden in the other tests via the
+shared `GEOMETRY` list (placeholder values that exercise the flux arithmetic, not real EGFC
+dimensions), and that the argparse defaults match `pipeline`'s
 `DEFAULT_*` constants. This is functional (real `main()` calls against a
 tmp_path raw dir, real output files read back), not a mock of `pipeline.run`,
 consistent with the rest of the suite's preference for exercising real code
@@ -148,12 +149,12 @@ consumes Layer C's output rather than raw readings, so it doesn't use the window
 `Flux = dC/dt * V / A` — the OLS slope of a cycle-averaged concentration against `elapsed_time`
 across one experiment's incubation (Layer C's cycle averages are that incubation's samples),
 scaled by the chamber's enclosed water volume `V` and the sediment footprint area `A` enclosed by
-its base. Both are **required** inputs with no default (`pipeline.run()` positional params,
-`--chamber-volume-l` / `--chamber-area-m2` with `required=True`) — unlike the RGA's nominal
-Faraday-cup sensitivity there is no meaningful "nominal" chamber size to fall back on, so a wrong
-flux from a silent default would be worse than an argparse error. They're the same for C1 and C2
-per the project owner. The dashboard's sidebar inputs default to `0.0`, which suppresses the flux
-table with a prompt rather than computing a divide-by-zero.
+its base. They default to the EGFC chamber's **30 L** and **0.30 m²**
+(`pipeline.DEFAULT_CHAMBER_VOLUME_L` / `DEFAULT_CHAMBER_AREA_M2`, used by `--chamber-volume-l` /
+`--chamber-area-m2` and the dashboard sidebar); `pipeline.run()` itself still takes them as
+positional params with no default. They're the same for C1 and C2 per the project owner. Setting
+either sidebar input to `0.0` suppresses the flux table with a prompt rather than computing a
+divide-by-zero.
 
 Reported in **mmol m⁻² h⁻¹** — still per hour, not the literature's more common mmol m⁻² d⁻¹
 convention; only the molar-prefix scale changed from an earlier µmol m⁻² h⁻¹ convention. Sign is
@@ -745,7 +746,7 @@ rga data exists. It only reports; nothing is dropped or written back to the pipe
 ```
 uv sync                 # install deps (polars, pytest dev group, streamlit, plotly)
 uv run pytest -q        # run the test suite
-uv run main.py <raw_dir> --out-dir <out_dir> --chamber-volume-l <L> --chamber-area-m2 <m2> \
+uv run main.py <raw_dir> --out-dir <out_dir> [--chamber-volume-l 30] [--chamber-area-m2 0.30] \
     [--settle-offset-s 60] [--format parquet|csv]
 uv run streamlit run dashboard.py   # launch the dashboard
 ```

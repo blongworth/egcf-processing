@@ -29,7 +29,7 @@ from egcf_processing.flux import compute_fluxes, linear_fit
 from egcf_processing.hobo import AMBIENT_LOCATION
 from egcf_processing.metabolism import fit_pi_curves, jassby_platt
 from egcf_processing.par import DEFAULT_MIN_DAY_COVERAGE, daily_max_trend, daily_par
-from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
+from egcf_processing.pipeline import DEFAULT_CHAMBER_AREA_M2, DEFAULT_CHAMBER_VOLUME_L, DEFAULT_SETTLE_OFFSET_S
 from egcf_processing import qc
 
 TABLE_NAMES = [
@@ -1841,9 +1841,12 @@ def main() -> None:
     )
 
     st.sidebar.header("Chamber geometry")
-    st.sidebar.caption("Required to compute flux; there is no meaningful default.")
-    chamber_volume_l = st.sidebar.number_input("Chamber volume (L)", value=0.0, min_value=0.0, format="%.3f")
-    chamber_area_m2 = st.sidebar.number_input("Sediment footprint area (m^2)", value=0.0, min_value=0.0, format="%.4f")
+    chamber_volume_l = st.sidebar.number_input(
+        "Chamber volume (L)", value=DEFAULT_CHAMBER_VOLUME_L, min_value=0.0, format="%.3f"
+    )
+    chamber_area_m2 = st.sidebar.number_input(
+        "Sediment footprint area (m^2)", value=DEFAULT_CHAMBER_AREA_M2, min_value=0.0, format="%.4f"
+    )
 
     data_dir = Path(data_dir_input)
     if not data_dir.exists():
