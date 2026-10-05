@@ -1347,16 +1347,10 @@ def test_measurements_tab_renders_par_panel_on_shared_axis(tmp_path):
     _write_par(tmp_path)
 
     _at, spec, titles = _measurements_subplot_titles(tmp_path)
-    assert titles[-3:] == [
-        "PAR (µmol photons m⁻² s⁻¹)",
-        "Daily light integral (mol photons m⁻² d⁻¹)",
-        "Daily max PAR (µmol photons m⁻² s⁻¹) — biofouling screen",
-    ]
-    for name in ("par_umol_m2_s", "daily light integral", "daily max PAR"):
-        trace = [d for d in spec["data"] if d["name"] == name][0]
-        assert spec["layout"][trace["xaxis"].replace("x", "xaxis")]["matches"] == "x"
-    # Two readings 10 s apart is a partial day: no trend line.
-    assert not [d for d in spec["data"] if d["name"].startswith("trend")]
+    assert titles[-1] == "PAR (µmol photons m⁻² s⁻¹)"
+    assert not [t for t in titles if t.startswith("Daily")]
+    trace = [d for d in spec["data"] if d["name"] == "par_umol_m2_s"][0]
+    assert spec["layout"][trace["xaxis"].replace("x", "xaxis")]["matches"] == "x"
 
 
 def test_measurements_tab_falls_back_to_raw_par_when_uncalibrated(tmp_path):

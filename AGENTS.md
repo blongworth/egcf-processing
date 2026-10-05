@@ -315,9 +315,7 @@ chamber shading, so light lines up against O2 and pH. If every calibrated value 
   (`coverage` ≥ 0.9). It's the **biofouling screen**: a fouling diffuser reads progressively low.
   Cloudy days lower the daily max too, so a decline is a prompt to inspect, not proof of fouling.
   `pipeline.run()` logs it at INFO.
-- The Measurements tab computes the same two quantities from the time-filtered `par` table, so
-  they follow the sidebar filter. They appear as two more linked panels: DLI bars, and daily-max
-  markers with the trend line. Partial days are faded and left out of the trend.
+- These are pipeline outputs only; the dashboard does not plot them.
 
 **Chamber shading (`--chamber-par-transmittance`).** The logger sees ambient PAR, while the
 enclosed sediment sees that times the fraction the chamber walls and lid pass.

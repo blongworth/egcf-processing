@@ -28,7 +28,6 @@ from egcf_processing.cycles import chamber_cycle_windows
 from egcf_processing.flux import compute_fluxes, linear_fit
 from egcf_processing.hobo import AMBIENT_LOCATION
 from egcf_processing.metabolism import fit_pi_curves, jassby_platt
-from egcf_processing.par import DEFAULT_MIN_DAY_COVERAGE, daily_max_trend, daily_par
 from egcf_processing.pipeline import DEFAULT_CHAMBER_AREA_M2, DEFAULT_CHAMBER_VOLUME_L, DEFAULT_SETTLE_OFFSET_S
 from egcf_processing import qc
 
@@ -855,67 +854,6 @@ def render_status_tab(
     _render_linked_timeseries(sections, title="Status", chamber_spans=chamber_spans)
 
 
-def _par_daily_sections(par: pl.DataFrame) -> list[tuple[str, list, bool, bool]]:
-    """Daily light integral and daily max PAR panels, one bar/marker per UTC day.
-
-    Computed from the (time-range-filtered) par table rather than loaded, so
-    they follow the sidebar filter. Partial days (coverage below
-    DEFAULT_MIN_DAY_COVERAGE) are drawn faded and left out of the trend: their
-    DLI is short by construction, not dim. The trend line is the biofouling
-    screen (see par.daily_max_trend).
-    """
-    daily = daily_par(par).drop_nulls("max_par_umol_m2_s")
-    if daily.is_empty():
-        return []
-    noon = daily.with_columns(
-        (pl.col("date").cast(pl.Datetime) + pl.duration(hours=12)).alias("noon"),
-        (pl.col("coverage") >= DEFAULT_MIN_DAY_COVERAGE).alias("full"),
-    )
-    opacity = [1.0 if full else 0.35 for full in noon["full"]]
-    hover = [
-        f"{d}<br>coverage {c:.0%}" + ("" if full else " (partial day)")
-        for d, c, full in zip(noon["date"], noon["coverage"], noon["full"])
-    ]
-    dli = go.Bar(
-        x=noon["noon"],
-        y=noon["dli_mol_m2_d"],
-        width=[86_400_000 * 0.8] * noon.height,
-        marker={"opacity": opacity},
-        name="daily light integral",
-        customdata=hover,
-        hovertemplate="%{customdata}<br>DLI %{y:.2f} mol m⁻² d⁻¹<extra></extra>",
-    )
-    max_traces = [
-        go.Scatter(
-            x=noon["noon"],
-            y=noon["max_par_umol_m2_s"],
-            mode="markers",
-            marker={"size": 10, "opacity": opacity},
-            name="daily max PAR",
-            text=hover,
-            hovertemplate="%{text}<br>max %{y:.0f} µmol m⁻² s⁻¹<extra></extra>",
-        )
-    ]
-    trend = daily_max_trend(daily)
-    if trend is not None:
-        full_noons = noon.filter(pl.col("full"))["noon"]
-        days = [(t - full_noons.min()).days for t in full_noons]
-        max_traces.append(
-            go.Scatter(
-                x=full_noons,
-                y=[trend["intercept_umol_m2_s"] + trend["slope_umol_m2_s_per_day"] * d for d in days],
-                mode="lines",
-                line={"dash": "dash", "width": 2},
-                name=f"trend {trend['pct_per_day']:+.1f}%/day ({trend['n_days']} full days)",
-                hoverinfo="skip",
-            )
-        )
-    return [
-        ("Daily light integral (mol photons m⁻² d⁻¹)", [dli], False, False),
-        ("Daily max PAR (µmol photons m⁻² s⁻¹) — biofouling screen", max_traces, False, False),
-    ]
-
-
 def _hobo_mesocosm_diff_section(
     hobo: pl.DataFrame, location_colors: dict[str, str]
 ) -> tuple[str, list[go.Scatter], bool, bool, bool] | None:
@@ -1059,7 +997,6 @@ def render_measurements_tab(
                 False,
             )
         )
-        sections += _par_daily_sections(par)
 
     hobo = tables["hobo_oxygen"]
     if hobo is None or hobo.is_empty():
