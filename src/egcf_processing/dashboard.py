@@ -24,10 +24,11 @@ from egcf_processing.aggregate import (
     match_readings_to_windows,
 )
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
-from egcf_processing.cycles import chamber_cycle_windows
-from egcf_processing.flux import compute_fluxes, linear_fit
+from egcf_processing.cycles import chamber_cycle_windows, experiment_spans
+from egcf_processing.flux import attach_experiment_par, compute_fluxes, linear_fit
 from egcf_processing.hobo import AMBIENT_LOCATION
-from egcf_processing.metabolism import fit_pi_curves, jassby_platt
+from egcf_processing.metabolism import DEFAULT_CHAMBER_PAR_TRANSMITTANCE, classify_o2_fluxes, fit_pi_curves, jassby_platt
+from egcf_processing.par import PAR_SCHEMA
 from egcf_processing.pipeline import DEFAULT_CHAMBER_AREA_M2, DEFAULT_CHAMBER_VOLUME_L, DEFAULT_SETTLE_OFFSET_S
 from egcf_processing import qc
 
@@ -1083,6 +1084,58 @@ def _elapsed_minutes_expr() -> pl.Expr:
     return (pl.col("elapsed_time").dt.total_seconds() / 60).alias("elapsed_time_min")
 
 
+DEFAULT_EXPERIMENT_VARIABLE = "oxygen_mgL"
+
+
+def _experiment_variable_select(options: list[str]) -> str:
+    """The Variable selectbox both grains share, defaulting to oxygen when it's offered."""
+    index = options.index(DEFAULT_EXPERIMENT_VARIABLE) if DEFAULT_EXPERIMENT_VARIABLE in options else 0
+    return st.selectbox("Variable", options, index=index, key="experiment_variable")
+
+
+def _live_cycle_averages(
+    rga: pl.DataFrame | None,
+    scalup: pl.DataFrame | None,
+    status: pl.DataFrame | None,
+    valve: pl.DataFrame,
+    total_pressure_sensitivity: float,
+    settle_offset_s: float,
+) -> pl.DataFrame | None:
+    """egcf_chamber_cycles rebuilt at the sidebar settling time, rows with an experiment only.
+
+    None when the valve record yields no chamber cycles at all.
+    """
+    windows, _ = chamber_cycle_windows(valve, settle_offset_s=settle_offset_s)
+    if windows.is_empty():
+        return None
+    table = with_elapsed_time_s(
+        aggregate_onto_windows(
+            windows,
+            rga if rga is not None else pl.DataFrame(schema=RGA_SCHEMA),
+            scalup if scalup is not None else pl.DataFrame(schema=SCALUP_SCHEMA),
+            status if status is not None else pl.DataFrame(schema=STATUS_SCHEMA),
+            DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+            total_pressure_sensitivity,
+        )
+    )
+    return table.filter(pl.col("experiment_number").is_not_null())
+
+
+def cycle_experiments_in_range(
+    cycles: pl.DataFrame, settle_offset_s: float, time_range: tuple[datetime, datetime] | None
+) -> tuple[dict[int, datetime], list[int]]:
+    """Experiment start times from a cycle-averages table, and the experiments starting in range.
+
+    "timestamp" is window_start, which has settle_offset_s baked in (unlike Full
+    data's windows, computed with settle_offset_s=0.0) -- subtract it back out so
+    these start times match Full data's exactly regardless of the slider.
+    """
+    start_by_exp = {
+        e: s - timedelta(seconds=settle_offset_s) for e, s in experiment_start_times(cycles, "timestamp").items()
+    }
+    return start_by_exp, experiments_in_range(start_by_exp, time_range)
+
+
 def _render_experiment_full_data(
     rga: pl.DataFrame | None,
     scalup: pl.DataFrame | None,
@@ -1090,18 +1143,20 @@ def _render_experiment_full_data(
     valve: pl.DataFrame,
     hobo: pl.DataFrame | None,
     total_pressure_sensitivity: float,
+    settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
     time_range: tuple[datetime, datetime] | None = None,
-) -> None:
+) -> tuple[str, str, str, bool] | None:
+    """Per-reading plot for one experiment; returns (experiment, variable, label, sci) for the rate/flux plots."""
     windows, _ = chamber_cycle_windows(valve, settle_offset_s=0.0)
     if windows.is_empty():
         st.info("No valid chamber cycles found in this dataset.")
-        return
+        return None
 
     start_by_exp = experiment_start_times(windows, "window_start")
     experiments = experiments_in_range(start_by_exp, time_range)
     if not experiments:
         st.info("No experiment starts in the selected time range.")
-        return
+        return None
     experiment = st.selectbox(
         "Experiment",
         [str(e) for e in experiments],
@@ -1110,14 +1165,6 @@ def _render_experiment_full_data(
     )
     exp_windows = windows.filter(pl.col("experiment_number") == int(experiment))
     experiment_start = start_by_exp[int(experiment)]
-
-    settle_offset_s = st.slider(
-        "Settling time after valve switch (s)",
-        min_value=0,
-        max_value=300,
-        value=int(DEFAULT_SETTLE_OFFSET_S),
-        key="settle_offset_s",
-    )
 
     have_rga = rga is not None and not rga.is_empty()
     have_scalup = scalup is not None and not scalup.is_empty()
@@ -1150,8 +1197,8 @@ def _render_experiment_full_data(
     other_options = scalup_options + status_options + total_pressure_options
     if not mass_options and not other_options:
         st.info("No plottable variables available for this experiment.")
-        return
-    variable = st.selectbox("Variable", mass_options + other_options, key="experiment_variable")
+        return None
+    variable = _experiment_variable_select(mass_options + other_options)
 
     is_mass_variable = variable.startswith("mass_")
     if is_mass_variable:
@@ -1199,6 +1246,7 @@ def _render_experiment_full_data(
     _render_experiment_hobo_oxygen(
         hobo, exp_scalup if have_scalup else None, exp_windows, experiment, experiment_start
     )
+    return experiment, variable, variable_label, col_is_sci
 
 
 def _render_experiment_hobo_oxygen(
@@ -1274,53 +1322,18 @@ def _render_experiment_hobo_oxygen(
 
 
 def _render_experiment_cycle_averages(
-    rga: pl.DataFrame | None,
-    scalup: pl.DataFrame | None,
-    status: pl.DataFrame | None,
-    valve: pl.DataFrame,
-    total_pressure_sensitivity: float,
-    chamber_volume_l: float,
-    chamber_area_m2: float,
+    with_experiment: pl.DataFrame,
+    settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
     time_range: tuple[datetime, datetime] | None = None,
-) -> None:
-    settle_offset_s = st.slider(
-        "Settling time after valve switch (s)",
-        min_value=0,
-        max_value=300,
-        value=int(DEFAULT_SETTLE_OFFSET_S),
-        key="settle_offset_s",
-    )
-    windows, _ = chamber_cycle_windows(valve, settle_offset_s=settle_offset_s)
-    if windows.is_empty():
-        st.info("No valid chamber cycles found in this dataset.")
-        return
+) -> tuple[str, str, str, bool] | None:
+    """Cycle-average plot for one experiment; returns (experiment, variable, label, sci) for the rate/flux plots.
 
-    table = with_elapsed_time_s(
-        aggregate_onto_windows(
-            windows,
-            rga if rga is not None else pl.DataFrame(schema=RGA_SCHEMA),
-            scalup if scalup is not None else pl.DataFrame(schema=SCALUP_SCHEMA),
-            status if status is not None else pl.DataFrame(schema=STATUS_SCHEMA),
-            DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
-            total_pressure_sensitivity,
-        )
-    )
-
-    with_experiment = table.filter(pl.col("experiment_number").is_not_null())
-    if with_experiment.is_empty():
-        st.info("No rows with a known experiment_number in this dataset.")
-        return
-
-    # "timestamp" is window_start, which has settle_offset_s baked in (unlike Full
-    # data's windows, computed with settle_offset_s=0.0) -- subtract it back out so
-    # these start times match Full data's exactly regardless of the slider.
-    start_by_exp = {
-        e: s - timedelta(seconds=settle_offset_s) for e, s in experiment_start_times(with_experiment, "timestamp").items()
-    }
-    experiments = experiments_in_range(start_by_exp, time_range)
+    ``with_experiment`` is _live_cycle_averages' table, over every experiment.
+    """
+    start_by_exp, experiments = cycle_experiments_in_range(with_experiment, settle_offset_s, time_range)
     if not experiments:
         st.info("No experiment starts in the selected time range.")
-        return
+        return None
     with_experiment = with_experiment.filter(pl.col("experiment_number").is_in(experiments))
     experiment = st.selectbox(
         "Experiment",
@@ -1355,8 +1368,8 @@ def _render_experiment_cycle_averages(
     ]
     if not mass_options and not other_options:
         st.info("No plottable variables available for this experiment.")
-        return
-    variable = st.selectbox("Variable", mass_options + other_options, key="experiment_variable")
+        return None
+    variable = _experiment_variable_select(mass_options + other_options)
 
     is_mass_variable = variable.startswith("mass_")
     plot_df = (
@@ -1387,11 +1400,7 @@ def _render_experiment_cycle_averages(
         file_name=f"experiment_{experiment}_egcf_chamber_cycles.csv",
         mime="text/csv",
     )
-
-    rates_df = experiment_rates(with_experiment, variable, is_mass_variable)
-    _render_experiment_rates_plot(rates_df, variable_label, col_is_sci)
-
-    _render_experiment_fluxes(with_experiment, experiment, chamber_volume_l, chamber_area_m2)
+    return experiment, variable, variable_label, col_is_sci
 
 
 def _render_experiment_fluxes(
@@ -1623,6 +1632,7 @@ def render_experiment_tab(
     chamber_volume_l: float = 0.0,
     chamber_area_m2: float = 0.0,
     time_range: tuple[datetime, datetime] | None = None,
+    settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
 ) -> None:
     rga = tables["rga"]
     scalup = tables["scalup"]
@@ -1635,13 +1645,30 @@ def render_experiment_tab(
         return
 
     grain = st.radio("Grain", ["Full data", "Cycle averages"], horizontal=True, key="experiment_grain")
+    cycles = _live_cycle_averages(rga, scalup, status, valve, total_pressure_sensitivity, settle_offset_s)
 
     if grain == "Full data":
-        _render_experiment_full_data(rga, scalup, status, valve, hobo, total_pressure_sensitivity, time_range)
-    else:
-        _render_experiment_cycle_averages(
-            rga, scalup, status, valve, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2, time_range
+        selection = _render_experiment_full_data(
+            rga, scalup, status, valve, hobo, total_pressure_sensitivity, settle_offset_s, time_range
         )
+    elif cycles is None:
+        st.info("No valid chamber cycles found in this dataset.")
+        return
+    elif cycles.is_empty():
+        st.info("No rows with a known experiment_number in this dataset.")
+        return
+    else:
+        selection = _render_experiment_cycle_averages(cycles, settle_offset_s, time_range)
+    if selection is None or cycles is None or cycles.is_empty():
+        return
+
+    # Rates and fluxes are fit to cycle averages whichever grain is plotted above.
+    experiment, variable, variable_label, col_is_sci = selection
+    _, experiments = cycle_experiments_in_range(cycles, settle_offset_s, time_range)
+    in_range = cycles.filter(pl.col("experiment_number").is_in(experiments))
+    rates_df = experiment_rates(in_range, variable, variable.startswith("mass_"))
+    _render_experiment_rates_plot(rates_df, variable_label, col_is_sci)
+    _render_experiment_fluxes(in_range, experiment, chamber_volume_l, chamber_area_m2)
 
 
 def _pi_curve_traces(pi_fit: pl.DataFrame | None, par_max: float, colors: dict[str, str]) -> list[go.Scatter]:
@@ -1687,32 +1714,82 @@ def _metabolism_scatter(df: pl.DataFrame, y_col: str, chamber: str, color: str, 
     )
 
 
+def saved_par_transmittance(pi_fit: pl.DataFrame | None) -> float:
+    """The chamber PAR transmittance the pipeline was run with, or the default if unknown."""
+    if pi_fit is None or pi_fit.is_empty():
+        return DEFAULT_CHAMBER_PAR_TRANSMITTANCE
+    return float(pi_fit["chamber_par_transmittance"][0])
+
+
+def live_metabolism(
+    tables: dict[str, pl.DataFrame | None],
+    settle_offset_s: float,
+    chamber_volume_l: float,
+    chamber_area_m2: float,
+    total_pressure_sensitivity: float,
+    chamber_par_transmittance: float,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Layers C-E rebuilt from Layer A, mirroring pipeline.run: (fluxes, metabolism, pi_fit).
+
+    Lets the sidebar settling time and geometry reach the metabolism results
+    instead of whatever the pipeline was run with. The dark threshold, PAR
+    coverage and min r2 stay at the pipeline defaults.
+    """
+    windows, _ = chamber_cycle_windows(tables["valve"], settle_offset_s=settle_offset_s)
+    par = tables["par"] if tables["par"] is not None else pl.DataFrame(schema=PAR_SCHEMA)
+    cycle_averages = aggregate_onto_windows(
+        windows,
+        tables["rga"] if tables["rga"] is not None else pl.DataFrame(schema=RGA_SCHEMA),
+        tables["scalup"] if tables["scalup"] is not None else pl.DataFrame(schema=SCALUP_SCHEMA),
+        tables["status"] if tables["status"] is not None else pl.DataFrame(schema=STATUS_SCHEMA),
+        DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+        total_pressure_sensitivity,
+        par=par,
+    )
+    fluxes = compute_fluxes(cycle_averages, chamber_volume_l, chamber_area_m2)
+    fluxes = attach_experiment_par(fluxes, par, experiment_spans(windows, settle_offset_s))
+    metabolism = classify_o2_fluxes(fluxes, chamber_par_transmittance=chamber_par_transmittance)
+    return fluxes, metabolism, fit_pi_curves(metabolism, chamber_par_transmittance)
+
+
 def render_metabolism_tab(
-    tables: dict[str, pl.DataFrame | None], time_range: tuple[datetime, datetime] | None = None
+    tables: dict[str, pl.DataFrame | None],
+    time_range: tuple[datetime, datetime] | None = None,
+    settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
+    chamber_volume_l: float = DEFAULT_CHAMBER_VOLUME_L,
+    chamber_area_m2: float = DEFAULT_CHAMBER_AREA_M2,
+    total_pressure_sensitivity: float = DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
 ) -> None:
     """O2 (and H+) flux against experiment-mean PAR, with the per-chamber P-I fit.
 
-    Reads the pipeline's egcf_metabolism / egcf_pi_fit / egcf_fluxes outputs
-    rather than recomputing, so the chamber geometry, dark threshold and
-    transmittance are whatever the pipeline was run with -- unlike the
-    Experiment tab's live flux, the sidebar geometry doesn't apply here.
-    The one exception: when the time range drops some experiments, the P-I
-    curve is refit over the ones left, so it describes the points shown.
-    R in the GPP column stays the pipeline's whole-deployment dark mean.
+    Recomputed live from Layer A (see live_metabolism), so the sidebar settling
+    time and chamber geometry apply here as they do on the Experiment tab. The
+    transmittance is the one recorded in the pipeline's egcf_pi_fit. When the
+    time range drops some experiments, the P-I curve is refit over the ones
+    left, so it describes the points shown; R in the GPP column stays the
+    whole-deployment dark mean.
     """
-    metabolism = tables["egcf_metabolism"]
-    if metabolism is None or metabolism.is_empty():
+    valve = tables["valve"]
+    if valve is None or valve.is_empty():
         _empty_state("metabolism")
         return
-    pi_fit = tables["egcf_pi_fit"]
-    transmittance = pi_fit["chamber_par_transmittance"][0] if pi_fit is not None and not pi_fit.is_empty() else None
+    if chamber_volume_l <= 0 or chamber_area_m2 <= 0:
+        st.info("Enter the chamber volume and sediment footprint area in the sidebar to compute metabolism.")
+        return
+    transmittance = saved_par_transmittance(tables["egcf_pi_fit"])
+    fluxes, metabolism, pi_fit = live_metabolism(
+        tables, settle_offset_s, chamber_volume_l, chamber_area_m2, total_pressure_sensitivity, transmittance
+    )
+    if metabolism.is_empty():
+        st.info("Not enough cycles in any experiment to fit an O2 flux.")
+        return
     refit = False
     if time_range is not None:
         in_range = metabolism.filter(pl.col("experiment_start").is_between(*time_range))
         if in_range.is_empty():
             st.info("No experiment starts in the selected time range.")
             return
-        refit = in_range.height < metabolism.height and transmittance is not None
+        refit = in_range.height < metabolism.height
         metabolism = in_range
         if refit:
             pi_fit = fit_pi_curves(metabolism, transmittance)
@@ -1720,10 +1797,12 @@ def render_metabolism_tab(
     if placed.is_empty():
         st.info("No O2 flux overlaps the PAR record, so there's nothing to place on a light axis.")
         return
-    par_basis = "ambient PAR at the logger" if transmittance in (None, 1.0) else f"PAR × chamber transmittance {transmittance:g}"
+    par_basis = "ambient PAR at the logger" if transmittance == 1.0 else f"PAR × chamber transmittance {transmittance:g}"
     st.caption(
         f"Each point is one experiment's O2 flux against its mean {par_basis}. Hollow markers are excluded "
-        "fluxes (hover for the reason). Geometry, dark threshold and transmittance are fixed at processing time."
+        f"fluxes (hover for the reason). Computed with the sidebar settling time ({settle_offset_s:g} s) and "
+        f"geometry ({chamber_volume_l:g} L over {chamber_area_m2:g} m²); the dark threshold, PAR coverage and "
+        "min r² are the pipeline defaults."
         + (" The P–I fit is refit over the experiments in the selected time range." if refit else "")
     )
 
@@ -1732,9 +1811,8 @@ def render_metabolism_tab(
     par_max = float(placed["par_chamber_umol_m2_s"].max())
     x_label = "PAR (µmol photons m⁻² s⁻¹)"
 
-    fluxes = tables["egcf_fluxes"]
     h_ion = None
-    if fluxes is not None and "par_mean_umol_m2_s" in fluxes.columns:
+    if not fluxes.is_empty():
         h_ion = (
             fluxes.filter(pl.col("variable") == "h_ion")
             .select("experiment_number", "chamber", pl.col("output_value").alias("h_ion_flux"))
@@ -1816,12 +1894,26 @@ def main() -> None:
         format="%.2e",
     )
 
+    st.sidebar.header("Chamber cycles")
+    settle_offset_s = st.sidebar.slider(
+        "Settling time after valve switch (s)",
+        min_value=0,
+        max_value=300,
+        value=int(DEFAULT_SETTLE_OFFSET_S),
+        key="settle_offset_s",
+        help="Readings this soon after each valve switch are left out of cycle averages, fluxes and metabolism.",
+    )
+
     st.sidebar.header("Chamber geometry")
     chamber_volume_l = st.sidebar.number_input(
-        "Chamber volume (L)", value=DEFAULT_CHAMBER_VOLUME_L, min_value=0.0, format="%.3f"
+        "Chamber volume (L)", value=DEFAULT_CHAMBER_VOLUME_L, min_value=0.0, format="%.3f", key="chamber_volume_l"
     )
     chamber_area_m2 = st.sidebar.number_input(
-        "Sediment footprint area (m^2)", value=DEFAULT_CHAMBER_AREA_M2, min_value=0.0, format="%.4f"
+        "Sediment footprint area (m^2)",
+        value=DEFAULT_CHAMBER_AREA_M2,
+        min_value=0.0,
+        format="%.4f",
+        key="chamber_area_m2",
     )
 
     data_dir = Path(data_dir_input)
@@ -1848,9 +1940,13 @@ def main() -> None:
     with measurements_tab:
         render_measurements_tab(plot_tables, partial_pressure_sensitivity)
     with experiment_tab:
-        render_experiment_tab(tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2, time_range)
+        render_experiment_tab(
+            tables, total_pressure_sensitivity, chamber_volume_l, chamber_area_m2, time_range, settle_offset_s
+        )
     with metabolism_tab:
-        render_metabolism_tab(tables, time_range)
+        render_metabolism_tab(
+            tables, time_range, settle_offset_s, chamber_volume_l, chamber_area_m2, total_pressure_sensitivity
+        )
 
 
 if __name__ == "__main__":

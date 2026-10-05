@@ -403,7 +403,9 @@ def test_hobo_oxygen_comparison_and_mesocosm_diff_plots(tmp_path):
             "oxygen_mgl": [8.0, 8.1],
         },
         schema={"ts": pl.Datetime, "oxygen_mgl": pl.Float64},
-    )
+    ).with_columns(
+        pl.lit(None, dtype=dtype).alias(col) for col, dtype in SCALUP_SCHEMA.items() if col not in ("ts", "oxygen_mgl")
+    ).select(list(SCALUP_SCHEMA))
     scalup_df.write_parquet(tmp_path / "scalup.parquet")
     hobo_df = pl.DataFrame(
         {
@@ -525,6 +527,24 @@ def test_flux_over_time_renders_even_when_selected_experiment_has_no_fit(tmp_pat
     assert not tab.dataframe  # no per-experiment table for the thin experiment
     spec = _flux_over_time_spec(tab)
     assert spec is not None and spec["data"]
+
+
+@pytest.mark.parametrize("grain", ["Full data", "Cycle averages"])
+def test_experiment_tab_shows_rates_and_fluxes_in_either_grain(tmp_path, grain):
+    _write_two_experiments_one_thin(tmp_path)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.tabs[2].radio(key="experiment_grain").set_value(grain).run(timeout=60)
+    assert not at.exception
+
+    tab = at.tabs[2]
+    assert tab.selectbox(key="experiment_variable").value == "oxygen_mgL"
+    titles = [json.loads(c.proto.spec)["layout"].get("title", {}).get("text") for c in tab.get("plotly_chart")]
+    assert "oxygen_mgL rate per experiment" in titles
+    assert "Benthic flux" in [h.value for h in tab.subheader]
+    assert _flux_over_time_spec(tab) is not None
 
 
 def test_flux_variable_selector_filters_the_flux_over_time_subplots(tmp_path):
@@ -703,7 +723,8 @@ def test_experiment_tab_cycle_averages_variable_options_and_settle_slider(tmp_pa
         "water_pump_rpm",
     ]
     assert [r.label for r in tab.get("radio")] == ["Grain"]
-    assert [s.label for s in tab.get("slider")] == ["Settling time after valve switch (s)"]
+    assert not tab.get("slider")
+    assert at.sidebar.slider(key="settle_offset_s").label == "Settling time after valve switch (s)"
     exp_select = [s for s in tab.get("selectbox") if s.label == "Experiment"][0]
     assert exp_select.options == ["1 (2026-01-01 00:00:00)"]
 
@@ -777,9 +798,7 @@ def test_experiment_tab_full_data_grain_settling_slider_greys_out_dropped_points
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     assert not at.exception
 
-    tab = at.tabs[2]
-    slider = [s for s in tab.get("slider") if "settl" in s.label.lower()][0]
-    slider.set_value(2).run(timeout=60)
+    at.sidebar.slider(key="settle_offset_s").set_value(2).run(timeout=60)
     assert not at.exception
 
     tab = at.tabs[2]
@@ -1344,7 +1363,7 @@ def test_sidebar_time_range_filter_absent_for_a_single_instant_dataset(tmp_path)
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     assert not at.exception
     assert not at.sidebar.selectbox
-    assert not at.sidebar.slider
+    assert [sl.key for sl in at.sidebar.slider] == ["settle_offset_s"]
 
 
 def _write_par(tmp_path, calibrated=True):
@@ -1413,37 +1432,53 @@ def test_measurements_tab_falls_back_to_raw_par_when_uncalibrated(tmp_path):
     assert any("No PAR calibration matched" in i.value for i in at.tabs[1].info)
 
 
+_METABOLISM_PAR = [5.0, 10.0, 100.0, 300.0, 800.0, 1500.0, None]
+_METABOLISM_T0 = datetime(2026, 9, 19)
+
+
+def _jassby_platt_flux(par, pmax, alpha, r):
+    return pmax * np.tanh(alpha * par / pmax) - r
+
+
 def _write_metabolism(tmp_path):
-    starts = [datetime(2026, 9, 19, 4 * i) for i in range(4)]
+    """Seven 40-minute experiments, two hours apart, rebuilt live by the Metabolism tab.
+
+    Each experiment is C1 Re, C2 Re, C1 Re, C2 Re, C2 Fl at 10-minute steps,
+    so each chamber gets two cycles and one fittable O2 slope; the one scalup
+    reading per cycle sits 3 minutes in. O2 follows a
+    Jassby-Platt curve against the experiment's PAR (C2 twice C1). Experiment
+    6 logs only two PAR readings (coverage below minimum, so excluded) and
+    experiment 7 has none (not placed on the light axis).
+    """
+    valve_rows, scalup_rows, par_rows = [], [], []
+    for i, par_value in enumerate(_METABOLISM_PAR):
+        t0 = _METABOLISM_T0 + timedelta(hours=2 * i)
+        for minute, chamber, state in [(0, "C1", "Re"), (10, "C2", "Re"), (20, "C1", "Re"), (30, "C2", "Re"), (40, "C2", "Fl")]:
+            valve_rows.append((t0 + timedelta(minutes=minute), chamber, state))
+        for chamber, scale, first_minute in [("C1", 1.0, 3), ("C2", 2.0, 13)]:
+            flux = scale * _jassby_platt_flux(par_value or 0.0, 10.0, 0.05, 3.0)
+            # flux (mmol m-2 h-1) = slope (mg/L/min) / 32 * 30 L / 0.30 m^2 * 60
+            slope = flux / 187.5
+            for k in (0, 1):
+                ts = t0 + timedelta(minutes=first_minute + 20 * k)
+                scalup_rows.append((ts, ts, 15.0, 31.0, 1010.0, 8.0 + slope * 20 * k, 8.0, 31))
+        n_par = 0 if par_value is None else (2 if i == 5 else 8)
+        par_rows += [(t0 + timedelta(minutes=5 * k), par_value) for k in range(n_par)]
+    pl.DataFrame(valve_rows, schema=VALVE_SCHEMA, orient="row").write_parquet(tmp_path / "valve.parquet")
+    pl.DataFrame(scalup_rows, schema=SCALUP_SCHEMA, orient="row").write_parquet(tmp_path / "scalup.parquet")
     pl.DataFrame(
         {
-            "experiment_number": [1, 1, 2, 2, 3, 3, 4, 4],
-            "chamber": ["C1", "C2"] * 4,
-            "experiment_start": [s for s in starts for _ in range(2)],
-            "par_mean_umol_m2_s": [6.5, 6.5, 500.0, 500.0, 1000.0, 1000.0, None, None],
-            "par_integrated_mol_m2": [0.07, 0.07, 5.4, 5.4, 10.8, 10.8, None, None],
-            "par_coverage": [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, None, None],
-            "par_chamber_umol_m2_s": [6.5, 6.5, 500.0, 500.0, 1000.0, 1000.0, None, None],
-            "o2_flux_mmol_m2_h": [-200.0, -500.0, 1000.0, 2500.0, 1400.0, 3200.0, 10.0, 10.0],
-            "r2": [0.9, 0.9, 0.95, 0.95, None, 0.9, 0.5, 0.5],
-            "period": ["dark", "dark", "light", "light", "light", "light", None, None],
-            "used": [True, True, True, True, False, False, False, False],
-            "excluded_reason": [None, None, None, None, "PAR coverage below minimum", "PAR coverage below minimum", "no PAR", "no PAR"],
-            "ncp_mmol_m2_h": [None, None, 1000.0, 2500.0, None, None, None, None],
-            "gpp_mmol_m2_h": [None, None, 1200.0, 3000.0, None, None, None, None],
+            "ts": [ts for ts, _ in par_rows],
+            "scan_no": list(range(len(par_rows))),
+            "par_raw": [v for _, v in par_rows],
+            "par_umol_m2_s": [v for _, v in par_rows],
+            "serial_number": ["50472"] * len(par_rows),
+            "sensor_number": [1] * len(par_rows),
+            "cal_date": [None] * len(par_rows),
+            "interval_s": [300.0] * len(par_rows),
         },
-        schema=METABOLISM_SCHEMA,
-    ).write_parquet(tmp_path / "egcf_metabolism.parquet")
-    pl.DataFrame(
-        [
-            {**{k: None for k in PI_FIT_SCHEMA}, "chamber": "C1", "chamber_par_transmittance": 1.0, "n_points": 4,
-             "pmax_mmol_m2_h": 1500.0, "alpha_mmol_m2_h_per_par": 5.0, "r_fit_mmol_m2_h": 200.0,
-             "ik_umol_m2_s": 300.0, "converged": True},
-            {**{k: None for k in PI_FIT_SCHEMA}, "chamber": "C2", "chamber_par_transmittance": 1.0, "n_points": 2,
-             "converged": False},
-        ],
-        schema=PI_FIT_SCHEMA,
-    ).write_parquet(tmp_path / "egcf_pi_fit.parquet")
+        schema=PAR_SCHEMA,
+    ).write_parquet(tmp_path / "par.parquet")
 
 
 def _metabolism_tab(tmp_path):
@@ -1454,52 +1489,62 @@ def _metabolism_tab(tmp_path):
     return at.tabs[3]
 
 
-def test_metabolism_tab_plots_o2_vs_par_with_fit_and_h_ion_panel(tmp_path):
+def test_metabolism_tab_recomputes_o2_vs_par_with_fit_and_h_ion_panel(tmp_path):
     _write_metabolism(tmp_path)
-    pl.DataFrame(
-        {
-            "experiment_number": [1, 2],
-            "chamber": ["C1", "C1"],
-            "variable": ["h_ion", "h_ion"],
-            "output_value": [0.02, -0.03],
-            "par_mean_umol_m2_s": [6.5, 500.0],
-        }
-    ).write_parquet(tmp_path / "egcf_fluxes.parquet")
 
     tab = _metabolism_tab(tmp_path)
     spec = json.loads(tab.get("plotly_chart")[0].proto.spec)
     titles = [a["text"] for a in spec["layout"]["annotations"]]
     assert titles == ["O2 flux (mmol m⁻² h⁻¹)", "H⁺ flux (mmol m⁻² h⁻¹) — should oppose O2"]
     names = [d["name"] for d in spec["data"]]
-    # Rows with no PAR aren't placed; excluded-but-placed rows are hollow.
+    # Experiment 7 has no PAR so isn't placed; experiment 6 is placed but hollow.
     assert names.count("C1") == 2 and "C1 excluded" in names
-    # Only the converged chamber gets a curve.
-    assert [n for n in names if "fit" in n] == ["C1 fit (Ik=300)"]
-    assert len(tab.dataframe) == 2
+    assert sorted(n for n in names if "fit" in n) == ["C1 fit (Ik=200)", "C2 fit (Ik=200)"]
+    pi_fit = tab.dataframe[0].value.set_index("chamber")
+    assert pi_fit.loc["C1", "pmax_mmol_m2_h"] == pytest.approx(10.0, rel=1e-3)
+    assert pi_fit.loc["C2", "r_fit_mmol_m2_h"] == pytest.approx(6.0, rel=1e-3)
+    assert any("settling time (60 s)" in c.value for c in tab.caption)
+
+
+def test_metabolism_tab_follows_the_sidebar_settling_time_and_geometry(tmp_path):
+    _write_metabolism(tmp_path)
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+
+    # Halving the volume halves every flux, so the fitted Pmax halves too.
+    at.sidebar.number_input(key="chamber_volume_l").set_value(15.0).run(timeout=60)
+    assert not at.exception
+    pi_fit = at.tabs[3].dataframe[0].value.set_index("chamber")
+    assert pi_fit.loc["C1", "pmax_mmol_m2_h"] == pytest.approx(5.0, rel=1e-3)
+
+    # A 5-minute settle drops every scalup reading (they sit 3 minutes in).
+    at.sidebar.slider(key="settle_offset_s").set_value(300).run(timeout=60)
+    assert not at.exception
+    assert not at.tabs[3].get("plotly_chart")
+    assert any("Not enough cycles" in i.value for i in at.tabs[3].info)
 
 
 def test_metabolism_tab_follows_the_sidebar_time_range_and_refits(tmp_path):
     _write_metabolism(tmp_path)
-    # A timestamped table gives the sidebar a range; "Last 6 hours" then keeps
-    # experiments 3 (08:00, excluded) and 4 (12:00, no PAR).
-    _write_system_health_over(tmp_path, [datetime(2026, 9, 18), datetime(2026, 9, 19, 12)])
 
     at = AppTest.from_file(str(DASHBOARD_PATH))
     at.run(timeout=60)
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    # The data ends at 12:40, so "Last 6 hours" keeps experiments 5-7 (08:00 on).
     at.sidebar.selectbox[0].set_value("Last 6 hours").run(timeout=60)
     assert not at.exception
     tab = at.tabs[3]
     names = [d["name"] for d in json.loads(tab.get("plotly_chart")[0].proto.spec)["data"]]
-    assert sorted(names) == ["C1 excluded", "C2 excluded"]
+    assert sorted(set(names)) == ["C1", "C1 excluded", "C2", "C2 excluded"]
     assert any("refit over the experiments in the selected time range" in c.value for c in tab.caption)
 
     at.sidebar.selectbox[0].set_value("All data").run(timeout=60)
     names = [d["name"] for d in json.loads(at.tabs[3].get("plotly_chart")[0].proto.spec)["data"]]
-    assert "C1 fit (Ik=300)" in names
+    assert "C1 fit (Ik=200)" in names
 
 
-def test_metabolism_tab_empty_state_without_outputs(tmp_path):
+def test_metabolism_tab_empty_state_without_valve_data(tmp_path):
     _write_par(tmp_path)
     tab = _metabolism_tab(tmp_path)
     assert "No metabolism data" in tab.info[0].value

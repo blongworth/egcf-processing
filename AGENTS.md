@@ -326,10 +326,14 @@ enclosed sediment sees that times the fraction the chamber walls and lid pass.
   `egcf_pi_fit.chamber_par_transmittance` records it.
 - Layer A–D PAR columns stay **ambient**, because they describe the sensor.
 
-**Dashboard Metabolism tab** (`render_metabolism_tab`). This tab reads the pipeline's
-`egcf_metabolism`, `egcf_pi_fit` and `egcf_fluxes` outputs; it doesn't recompute them. Chamber
-geometry, dark threshold and transmittance are therefore fixed at processing time, and the
-sidebar geometry doesn't apply here, unlike the Experiment Data tab's live flux.
+**Dashboard Metabolism tab** (`render_metabolism_tab`). This tab **recomputes** Layers C–E live
+from the Layer A tables (`live_metabolism`, mirroring `pipeline.run`). It does not read the saved
+`egcf_metabolism`/`egcf_fluxes`, so the sidebar settling time and chamber geometry apply here, as
+they do on the Experiment Data tab. Only the transmittance comes from the saved `egcf_pi_fit`
+(`saved_par_transmittance`, falling back to 1.0). The dark threshold, PAR coverage and min r² are
+the `metabolism` defaults, not whatever the pipeline was run with. On the real corpus the rebuild
+takes ~0.2 s, so it isn't cached. Because it starts from the unfiltered tables, GPP's R stays the
+whole-deployment dark mean.
 - The chart has two subplots sharing the PAR x-axis, each with its own y-axis, so it's never a
   dual axis. The top shows O2 flux, with the fitted Jassby–Platt curve for each converged
   chamber. The bottom shows H⁺ flux, which should run opposite to O2. It's omitted if there are
@@ -337,10 +341,9 @@ sidebar geometry doesn't apply here, unlike the Experiment Data tab's live flux.
 - Points use `par_chamber_umol_m2_s` and `chamber_color_map` colours. Excluded fluxes are hollow
   markers, with the reason in the hover. Fluxes with no PAR aren't placed.
 - Below the chart: the P–I parameter table, and an expander with the light incubations' NCP/GPP.
-- These three tables have no `ts`/`timestamp` column, so `filter_tables_to_range` leaves them
-  alone. Instead the tab keeps the experiments whose `experiment_start` falls in the sidebar range.
-  When that drops any, it refits the P–I curve over the rows left (`fit_pi_curves`) and says so in
-  the caption. GPP's R stays the pipeline's whole-deployment dark mean.
+- The tab keeps the experiments whose `experiment_start` falls in the sidebar range. When that
+  drops any, it refits the P–I curve over the rows left (`fit_pi_curves`) and says so in the
+  caption.
 
 **Sidebar time range.** The preset defaults to "Last 7 days", anchored at the end of the data.
 Status and Measurements filter raw rows. Experiment Data and Metabolism instead filter whole
@@ -558,10 +561,11 @@ from raw tables**, never by reading the pipeline's precomputed
 `egcf_chamber_cycles.parquet`. This is deliberate: it lets the settling
 period be adjusted interactively without re-running `egcf-process`.
 
-Both grains share one "Settling time after valve switch (s)" slider
-(`key="settle_offset_s"`, same widget key in both render functions so the
-value persists across a grain switch, default `pipeline.DEFAULT_SETTLE_OFFSET_S`)
--- this is the *same* time-based settle_offset_s the pipeline itself uses
+Both grains, and the Metabolism tab, use one sidebar "Settling time after valve
+switch (s)" slider (`key="settle_offset_s"`, under "Chamber cycles", default
+`pipeline.DEFAULT_SETTLE_OFFSET_S`), passed down from `main()`. It lives in the
+sidebar, not the Experiment tab, because it changes the metabolism results too.
+This is the *same* time-based settle_offset_s the pipeline itself uses
 (cycles.chamber_cycle_windows), just recomputed live instead of fixed at
 `egcf-process` run time.
 
@@ -592,13 +596,12 @@ a cycle at the same elapsed time, collapsing them onto one x-position).
 (`#B0B0B0`) "dropped (settling)" trace instead of hiding them, while kept
 points still render per-chamber in their normal colors.
 
-Below the rate plot, `Cycle averages` renders a **Benthic flux** section
+Below the rate plot, **both grains** render a **Benthic flux** section
 (`_render_experiment_fluxes`), calling the same `flux.compute_fluxes()` the
 pipeline uses against the live-built cycle-averaged table. It's deliberately
 independent of the Variable selectbox -- the flux quantities are a fixed set
 (see "Flux calculation"), not user-selected -- and the whole section is
-replaced by a prompt when the sidebar's chamber volume/area are still at their
-`0.0` defaults. It has three parts:
+replaced by a prompt when either sidebar chamber volume/area is set to `0.0`. It has three parts:
 
 1. `_render_experiment_flux_chart` -- grouped bars of the selected experiment's
    flux, **one subplot per variable**. Not one grouped bar chart: the variables
@@ -645,6 +648,15 @@ is silently omitted from both the fit overlay and the rates chart (a
 one-point "fit" is undefined) rather than raising. `Full data` does not get
 a fit overlay -- fitting is deliberately scoped to cycle-averaged points,
 which are far less noisy than individual raw readings.
+
+The rates chart and the Benthic flux section render under **either grain**:
+`render_experiment_tab` builds the cycle-averaged table once
+(`_live_cycle_averages`, at the sidebar settling time). Each grain's renderer
+returns its selected `(experiment, variable, label, sci)`, and the tab draws
+both sections from cycle averages below whichever per-experiment plot is
+shown. Variable names match across grains (`oxygen_mgL`, `mass_2`, ...), so
+the Full data selection carries straight over. The shared Variable selectbox
+defaults to `oxygen_mgL` (`DEFAULT_EXPERIMENT_VARIABLE`) when it's offered.
 
 The single-experiment plot's title carries the experiment's real start time
 as a `<br><sup>...</sup>` HTML subtitle (`Started YYYY-MM-DD HH:MM:SS`), and

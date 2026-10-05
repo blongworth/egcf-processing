@@ -74,7 +74,8 @@ dashboard.py     # thin shim -> egcf_processing.dashboard
 5. **Layer E (`egcf_metabolism`, `egcf_pi_fit`)** — each O2 flux classified light/dark by mean PAR,
    with R, NCP, and GPP, plus a per-chamber Jassby–Platt P–I fit (Pmax, α, R, Ik). Excluded
    fluxes are kept with an `excluded_reason`. PAR here is ambient × `--chamber-par-transmittance`
-   (default 1.0 = unmeasured). The dashboard's Metabolism tab plots these outputs. See `AGENTS.md`
+   (default 1.0 = unmeasured). The dashboard's Metabolism tab recomputes C–E live from Layer A, using
+   the sidebar settling time and geometry. See `AGENTS.md`
    for thresholds and units. See `AGENTS.md` for the per-variable formulas and caveats.
 
 Layers B and C share `aggregate.aggregate_onto_windows()` — they differ only in which `windows`
