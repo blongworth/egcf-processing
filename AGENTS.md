@@ -484,7 +484,7 @@ pipeline run itself, by design. Four tabs: Status (turbo speed/power/temp, water
 pump RPM, plus total pressure only if `status.parquet` has any non-null
 `raw_total_pressure_current` — currently always empty against real data, so
 this is normally a "no data" message, not a bug), Measurements (RGA mass
-data plus scalup sonde data, all with a raw/Amps/Torr unit toggle reusing
+data plus scalup sonde data, all with a raw/Amps/Torr unit toggle (default Torr) reusing
 `aggregate.py`'s conversion constants), and Experiment Data (per-experiment
 C1-vs-C2 comparison of one RGA mass or other variable against elapsed time,
 in minutes), and Metabolism (O2/H⁺ flux vs PAR with the P–I fit; see the PAR section). The status tab's "current" plot is deliberately

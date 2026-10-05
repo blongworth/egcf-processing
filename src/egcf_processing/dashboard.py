@@ -932,7 +932,7 @@ def render_measurements_tab(
     tables: dict[str, pl.DataFrame | None],
     partial_pressure_sensitivity: float,
 ) -> None:
-    unit = st.radio("Unit", ["raw", "amps", "torr"], horizontal=True, key="measurements_unit")
+    unit = st.radio("Unit", ["raw", "amps", "torr"], index=2, horizontal=True, key="measurements_unit")
     sci = unit in ("amps", "torr")
     chamber_spans = _chamber_shading_control(tables["valve"], key="measurements_chamber_shading")
     sections: list[tuple[str, list[go.Scatter], bool, bool]] = []

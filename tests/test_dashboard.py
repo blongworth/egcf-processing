@@ -1,7 +1,9 @@
+import base64
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -1385,6 +1387,22 @@ def test_measurements_tab_renders_par_panel_on_shared_axis(tmp_path):
     assert not [t for t in titles if t.startswith("Daily")]
     trace = [d for d in spec["data"] if d["name"] == "par_umol_m2_s"][0]
     assert spec["layout"][trace["xaxis"].replace("x", "xaxis")]["matches"] == "x"
+
+
+def test_measurements_tab_rga_defaults_to_torr(tmp_path):
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 1, 0, 0, i) for i in range(4)],
+            "mass": [2, 40, 2, 40],
+            "current": [10.0, 100.0, 20.0, 200.0],
+        }
+    ).write_parquet(tmp_path / "rga.parquet")
+
+    at, spec, _titles = _measurements_subplot_titles(tmp_path)
+    assert at.tabs[1].radio(key="measurements_unit").value == "torr"
+    mass_2 = [d for d in spec["data"] if d["name"] == "mass 2"][0]
+    y = np.frombuffer(base64.b64decode(mass_2["y"]["bdata"]), dtype=mass_2["y"]["dtype"])
+    assert all(y < 1e-6)
 
 
 def test_measurements_tab_falls_back_to_raw_par_when_uncalibrated(tmp_path):
