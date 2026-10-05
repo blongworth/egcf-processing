@@ -715,6 +715,31 @@ key reused across tables backed by different-typed columns) — this caught a
 real dtype-comparison bug during development that a plain `streamlit run` +
 manual click-through likely wouldn't have (this environment has no browser).
 
+### Data quality (Status tab)
+
+The top of the Status tab reports missingness and gross-range flags over the sidebar time range,
+computed by `qc.py` (no Streamlit, unit-tested in `tests/test_qc.py`) on the *filtered* tables. It
+renders before the status/system_health empty-state return, so it still shows when only scalup or
+rga data exists. It only reports; nothing is dropped or written back to the pipeline outputs.
+
+- **`STREAM_CADENCE`**: `(table, group_col, nominal_interval_s, gap_threshold_s)` per Layer A
+  stream, from the observed median spacing. Grouped streams (`rga` per `mass`, `hobo_oxygen` per
+  `location`) are scored per group. PAR's nominal interval comes from the file's own `interval_s`
+  when present. Completeness is *distinct* timestamps over `span / nominal`, capped at 1, so the
+  duplicated scalup `ts` values don't inflate it.
+- **Gaps include the leading and trailing intervals**: range start → first record and last record
+  → range end. A stream that starts late or stops early counts as missing, and `staleness_s`
+  (range end − last record) is what flags a live telemetry stream that has gone silent. Rows below
+  90% complete or staler than their gap threshold are highlighted.
+- **`RANGE_LIMITS`**: `{(table, column): (fail_lo, fail_hi, suspect_lo, suspect_hi)}`, inclusive,
+  with None for an open bound. Following QARTOD, **fail** means physically impossible or a sensor
+  error (pH ≤ 0, salinity ≤ 0, negative RGA current, a nonzero `turbo_error`), and **suspect** means
+  plausible but outside what this site normally sees (pH < 7, salinity < 20, turbo below 1200 Hz).
+  To make exactly 0 a failure under inclusive limits, use `_ABOVE_ZERO` (the smallest positive
+  float) as the lower limit. Null/NaN values are counted as `missing`, never `fail`, so an
+  uncalibrated PAR value isn't reported as a sensor error. The limit values are first guesses from
+  the data and should be reviewed.
+
 ## Development
 
 ```

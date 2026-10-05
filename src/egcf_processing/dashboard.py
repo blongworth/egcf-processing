@@ -29,6 +29,7 @@ from egcf_processing.flux import compute_fluxes, linear_fit
 from egcf_processing.metabolism import fit_pi_curves, jassby_platt
 from egcf_processing.par import DEFAULT_MIN_DAY_COVERAGE, daily_max_trend, daily_par
 from egcf_processing.pipeline import DEFAULT_SETTLE_OFFSET_S
+from egcf_processing import qc
 
 TABLE_NAMES = [
     "status",
@@ -632,7 +633,146 @@ def _chamber_shading_control(valve: pl.DataFrame | None, key: str) -> pl.DataFra
     return spans
 
 
-def render_status_tab(tables: dict[str, pl.DataFrame | None], total_pressure_sensitivity: float) -> None:
+LOW_COMPLETENESS = 0.9
+
+_MAX_FLAGGED_ROWS = 10_000
+
+_QC_HIGHLIGHT = "background-color: rgba(255, 75, 75, 0.15)"
+
+
+def humanize_seconds(seconds: float | None) -> str:
+    """Compact duration like ``2d 3h``, ``4h 12m``, ``35m`` or ``42s``; empty for None."""
+    if seconds is None:
+        return ""
+    s = int(round(seconds))
+    days, rem = divmod(s, 86_400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def _availability_figure(segments: pl.DataFrame, streams: list[str], start: datetime, end: datetime) -> go.Figure:
+    """One horizontal lane per stream; bars are contiguous data runs, blank space is a gap."""
+    fig = go.Figure()
+    with_table = segments.with_columns(pl.col("stream").str.split(" ").list.first().alias("table"))
+    for i, (table,) in enumerate(with_table.select("table").unique(maintain_order=True).iter_rows()):
+        g = with_table.filter(pl.col("table") == table)
+        fig.add_trace(
+            go.Bar(
+                y=g["stream"],
+                base=g["seg_start"],
+                x=((g["seg_end"] - g["seg_start"]).dt.total_milliseconds()).to_list(),
+                orientation="h",
+                marker_color=_MASS_COLOR_PALETTE[i % len(_MASS_COLOR_PALETTE)],
+                name=table,
+                showlegend=False,
+                customdata=list(zip(g["seg_start"].to_list(), g["seg_end"].to_list())),
+                hovertemplate="%{y}<br>%{customdata[0]} to %{customdata[1]}<extra></extra>",
+            )
+        )
+    fig.update_xaxes(type="date", range=[start, end])
+    fig.update_yaxes(categoryorder="array", categoryarray=streams[::-1])
+    fig.update_layout(
+        title="Data availability",
+        barmode="overlay",
+        height=80 + 22 * len(streams),
+        margin={"t": 40, "b": 30},
+    )
+    return fig
+
+
+def render_data_quality(tables: dict[str, pl.DataFrame | None], time_range: tuple[datetime, datetime] | None) -> None:
+    """Missingness against each stream's cadence and gross-range flags, over the sidebar range."""
+    if time_range is None:
+        time_range = tables_time_bounds(tables)
+    if time_range is None:
+        return
+    start, end = time_range
+
+    st.subheader("Data quality")
+    scores = qc.completeness(tables, start=start, end=end)
+    if scores.is_empty():
+        return
+    scores = scores.with_columns(
+        ((pl.col("completeness") < LOW_COMPLETENESS) | (pl.col("staleness_s") > pl.col("gap_threshold_s"))).alias(
+            "attention"
+        )
+    )
+    display = scores.select(
+        "stream",
+        "completeness",
+        "observed",
+        pl.col("expected").round(0).cast(pl.Int64),
+        "n_gaps",
+        *[
+            pl.col(c).map_elements(humanize_seconds, return_dtype=pl.Utf8).alias(c)
+            for c in ("longest_gap_s", "total_gap_s", "staleness_s")
+        ],
+        "last_record",
+    ).to_pandas()
+    attention = scores["attention"].to_list()
+    styled = display.style.apply(lambda row: [_QC_HIGHLIGHT if attention[row.name] else ""] * len(row), axis=1)
+    st.caption(
+        f"Completeness is distinct records over the expected count at each stream's nominal cadence. "
+        f"Highlighted rows are below {LOW_COMPLETENESS:.0%} complete or have been silent longer than "
+        f"their gap threshold."
+    )
+    st.dataframe(
+        styled,
+        column_config={
+            "completeness": st.column_config.ProgressColumn("Completeness", min_value=0.0, max_value=1.0, format="percent"),
+            "observed": "Observed",
+            "expected": "Expected",
+            "n_gaps": "Gaps",
+            "longest_gap_s": "Longest gap",
+            "total_gap_s": "Total gap",
+            "staleness_s": "Since last record",
+            "last_record": st.column_config.DatetimeColumn("Last record", format="YYYY-MM-DD HH:mm:ss"),
+        },
+        hide_index=True,
+    )
+
+    segments = qc.coverage_segments(tables, start=start, end=end)
+    if not segments.is_empty():
+        st.plotly_chart(_availability_figure(segments, scores["stream"].to_list(), start, end), width="stretch")
+
+    summary = qc.range_summary(tables)
+    if summary.is_empty():
+        return
+    st.caption(
+        "Gross-range checks: fail is physically impossible or a sensor error; suspect is plausible but "
+        "outside what this site normally sees. Null values are counted separately, never as failures."
+    )
+    st.dataframe(
+        summary,
+        column_config={
+            "pct_flagged": st.column_config.NumberColumn("Flagged", format="%.2f%%"),
+            "first_flag_ts": st.column_config.DatetimeColumn("First flagged", format="YYYY-MM-DD HH:mm:ss"),
+            "last_flag_ts": st.column_config.DatetimeColumn("Last flagged", format="YYYY-MM-DD HH:mm:ss"),
+        },
+        hide_index=True,
+    )
+    flagged = qc.flagged_rows(tables)
+    with st.expander(f"Flagged values ({flagged.height})"):
+        if flagged.height > _MAX_FLAGGED_ROWS:
+            st.caption(f"Showing the first {_MAX_FLAGGED_ROWS} of {flagged.height} flagged values.")
+        st.dataframe(flagged.head(_MAX_FLAGGED_ROWS), hide_index=True)
+
+
+
+def render_status_tab(
+    tables: dict[str, pl.DataFrame | None],
+    total_pressure_sensitivity: float,
+    time_range: tuple[datetime, datetime] | None = None,
+) -> None:
+    render_data_quality(tables, time_range)
+
     status = tables["status"]
     system_health = tables["system_health"]
     have_status = status is not None and not status.is_empty()
@@ -1716,7 +1856,7 @@ def main() -> None:
         ["Status", "Measurements", "Experiment Data", "Metabolism"]
     )
     with status_tab:
-        render_status_tab(plot_tables, total_pressure_sensitivity)
+        render_status_tab(plot_tables, total_pressure_sensitivity, time_range)
     with measurements_tab:
         render_measurements_tab(plot_tables, partial_pressure_sensitivity)
     with experiment_tab:

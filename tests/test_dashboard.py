@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from egcf_processing.combine import STATUS_SCHEMA, VALVE_SCHEMA
+from egcf_processing.combine import SCALUP_SCHEMA, STATUS_SCHEMA, VALVE_SCHEMA
 from egcf_processing.metabolism import METABOLISM_SCHEMA, PI_FIT_SCHEMA
 from egcf_processing.par import PAR_SCHEMA
 from egcf_processing.dashboard import (
@@ -24,6 +24,7 @@ from egcf_processing.dashboard import (
     experiments_in_range,
     experiment_start_times,
     flux_variable_units,
+    humanize_seconds,
     linear_fit,
     load_table,
     mass_color_map,
@@ -893,6 +894,12 @@ def _write_system_health(tmp_path):
     ).write_parquet(tmp_path / "system_health.parquet")
 
 
+def _status_figure_specs(tab):
+    """Plotly specs on the Status tab, minus the data-quality availability chart."""
+    specs = [json.loads(c.proto.spec) for c in tab.get("plotly_chart")]
+    return [s for s in specs if s["layout"].get("title", {}).get("text") != "Data availability"]
+
+
 def _status_tab_spec(tmp_path):
     at = AppTest.from_file(str(DASHBOARD_PATH))
     at.run(timeout=60)
@@ -906,10 +913,10 @@ def test_status_tab_renders_system_health_when_status_is_empty(tmp_path):
     _write_system_health(tmp_path)
 
     _at, tab = _status_tab_spec(tmp_path)
-    charts = tab.get("plotly_chart")
+    charts = _status_figure_specs(tab)
     assert len(charts) == 1
     assert not tab.get("info")
-    spec = json.loads(charts[0].proto.spec)
+    spec = charts[0]
     titles = [a["text"] for a in spec["layout"]["annotations"]]
     assert titles == ["Supply voltage (V)", "Supply current (A)", "Teensy temperature (degC)"]
 
@@ -919,9 +926,9 @@ def test_status_tab_renders_all_eight_panels_when_both_tables_populated(tmp_path
     _write_system_health(tmp_path)
 
     _at, tab = _status_tab_spec(tmp_path)
-    charts = tab.get("plotly_chart")
+    charts = _status_figure_specs(tab)
     assert len(charts) == 1
-    spec = json.loads(charts[0].proto.spec)
+    spec = charts[0]
     titles = [a["text"] for a in spec["layout"]["annotations"]]
     assert titles == [
         "Turbo speed (Hz)",
@@ -933,6 +940,58 @@ def test_status_tab_renders_all_eight_panels_when_both_tables_populated(tmp_path
         "Supply current (A)",
         "Teensy temperature (degC)",
     ]
+
+
+def _write_scalup_with_bad_ph(tmp_path):
+    ts = [datetime(2026, 1, 1, 0, 0, s) for s in (0, 17, 34, 51)]
+    pl.DataFrame(
+        {
+            "ts": ts,
+            "ts_scalup": ts,
+            "temp_degc": [15.0] * 4,
+            "sal_psu": [31.0] * 4,
+            "pressure_mbar": [1010.0] * 4,
+            "oxygen_mgl": [8.0] * 4,
+            "ph": [7.9, 0.0, 7.95, 8.0],
+            "field_mask": [31] * 4,
+        },
+        schema=SCALUP_SCHEMA,
+    ).write_parquet(tmp_path / "scalup.parquet")
+
+
+def test_status_tab_data_quality_reports_gaps_and_range_flags(tmp_path):
+    ts = [datetime(2026, 1, 1, 0, 0, s) for s in (0, 8, 16)] + [datetime(2026, 1, 1, 0, 5, s) for s in (0, 8)]
+    pl.DataFrame({"ts": ts, **{c: [0.0] * 5 for c in STATUS_SCHEMA if c not in ("ts", "payload_raw")}}).with_columns(
+        pl.lit(1200.0).alias("turbo_speed_hz"), pl.lit(None, dtype=pl.Utf8).alias("payload_raw")
+    ).cast(STATUS_SCHEMA).write_parquet(tmp_path / "status.parquet")
+    _write_scalup_with_bad_ph(tmp_path)
+
+    _at, tab = _status_tab_spec(tmp_path)
+    assert "Data quality" in [h.value for h in tab.get("subheader")]
+    completeness, summary = [d.value for d in tab.dataframe][:2]
+    status_row = completeness[completeness["stream"] == "status"].iloc[0]
+    assert status_row["n_gaps"] == 1
+    assert status_row["longest_gap_s"] == "4m"
+    ph = summary[(summary["table"] == "scalup") & (summary["column"] == "ph")].iloc[0]
+    assert ph["n_fail"] == 1
+    availability = [
+        json.loads(c.proto.spec)
+        for c in tab.get("plotly_chart")
+        if json.loads(c.proto.spec)["layout"]["title"]["text"] == "Data availability"
+    ]
+    assert len(availability) == 1
+
+
+def test_status_tab_data_quality_renders_without_status_tables(tmp_path):
+    _write_scalup_with_bad_ph(tmp_path)
+
+    _at, tab = _status_tab_spec(tmp_path)
+    assert "Data quality" in [h.value for h in tab.get("subheader")]
+    assert "No status data" in tab.get("info")[0].value
+
+
+def test_humanize_seconds():
+    assert [humanize_seconds(s) for s in (None, 42, 2100, 15_120, 183_600)] == ["", "42s", "35m", "4h 12m", "2d 3h"]
 
 
 def test_status_tab_empty_state_when_both_tables_missing(tmp_path):
@@ -995,11 +1054,11 @@ def test_status_tab_chamber_shading_toggle_draws_bands(tmp_path):
 
     shade = [c for c in at.tabs[0].get("checkbox") if c.label == "Shade by active chamber"][0]
     assert shade.value is False
-    assert not json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)["layout"].get("shapes")
+    assert not _status_figure_specs(at.tabs[0])[0]["layout"].get("shapes")
 
     shade.set_value(True).run(timeout=60)
     assert not at.exception
-    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
+    spec = _status_figure_specs(at.tabs[0])[0]
     shapes = spec["layout"]["shapes"]
     assert len(shapes) == 2
     assert {s["fillcolor"] for s in shapes} == set(chamber_color_map(["C1", "C2"]).values())
@@ -1160,7 +1219,7 @@ def _write_system_health_over(tmp_path, stamps):
 
 
 def _status_points(at):
-    spec = json.loads(at.tabs[0].get("plotly_chart")[0].proto.spec)
+    spec = _status_figure_specs(at.tabs[0])[0]
     return spec["data"][0]["x"]
 
 
