@@ -34,6 +34,7 @@ from egcf_processing.dashboard import (
     rga_current_to_unit,
     rga_full_ratio_to_mass,
     rga_wide_ratio_to_mass,
+    snap_range_to_steps,
     variable_value_expr,
     with_elapsed_time_s,
 )
@@ -1289,6 +1290,39 @@ def test_sidebar_custom_time_range_can_reach_the_final_partial_day(tmp_path):
     fine.set_range(datetime(2026, 9, 21), datetime(2026, 9, 21, 1)).run(timeout=60)
     assert not at.exception
     assert len(_status_points(at)) == 1
+
+
+def test_sidebar_custom_time_range_starts_from_the_current_preset(tmp_path):
+    stamps = [datetime(2026, 9, 18, 6), datetime(2026, 9, 20, 12), datetime(2026, 9, 21, 17, 55, 36)]
+    _write_system_health_over(tmp_path, stamps)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
+    at.sidebar.selectbox[0].set_value("Last 24 hours").run(timeout=60)
+    at.sidebar.selectbox[0].set_value("Custom").run(timeout=60)
+    assert not at.exception
+    assert not at.warning
+
+    assert at.sidebar.date_input[0].value == (date(2026, 9, 20), date(2026, 9, 21))
+    # 2026-09-20 17:55:36 -> 2026-09-21 17:55:36, widened onto the 1-minute grid.
+    assert at.sidebar.slider[0].value == (datetime(2026, 9, 20, 17, 55), datetime(2026, 9, 21, 17, 56))
+    assert len(_status_points(at)) == 1
+
+    # Picking new days drops the seed: the slider spans the whole new selection.
+    at.sidebar.date_input[0].set_value((date(2026, 9, 18), date(2026, 9, 18))).run(timeout=60)
+    assert not at.exception
+    assert at.sidebar.slider[0].value == (datetime(2026, 9, 18, 6), datetime(2026, 9, 19))
+
+
+def test_snap_range_to_steps_widens_and_clamps():
+    lo, hi = datetime(2026, 1, 1), datetime(2026, 1, 1, 2)
+    step = timedelta(minutes=1)
+    assert snap_range_to_steps(datetime(2026, 1, 1, 0, 10, 30), datetime(2026, 1, 1, 0, 20, 30), lo, hi, step) == (
+        datetime(2026, 1, 1, 0, 10),
+        datetime(2026, 1, 1, 0, 21),
+    )
+    assert snap_range_to_steps(datetime(2025, 12, 31), datetime(2026, 1, 2), lo, hi, step) == (lo, hi)
 
 
 def test_sidebar_time_range_filter_absent_for_a_single_instant_dataset(tmp_path):

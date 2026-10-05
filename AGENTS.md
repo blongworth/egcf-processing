@@ -518,6 +518,13 @@ halves exist to fix specific failures of the single full-span range slider it re
   slider *within* those days. A single slider across a 39-day deployment is hours per pixel, so
   short windows were undraggable. `date_range_bounds()` tolerates the 1-tuple `st.date_input`
   returns mid-selection (before the second date is picked), treating it as a single day.
+- Switching the preset to Custom starts from the range that was showing, not the full deployment.
+  Every run saves the applied range in `st.session_state["time_range_last"]`. The selectbox's
+  `on_change` copies it into the day picker's state, plus a slider seed that
+  `snap_range_to_steps()` widens onto the 1-minute grid. Picking new days drops the seed, so the
+  slider then spans the whole new day selection. The day picker has no `value=`; its state is
+  initialized and clamped to the data bounds in session state. Passing both triggers Streamlit's
+  "default value and Session State" warning.
 - `align_slider_bounds()` rounds the slider's upper bound **up** to a whole number of steps.
   `st.slider` only offers positions at `min_value + k * step`, so unless the span is an exact
   multiple of the step the true maximum is unreachable -- with the default 1-day step this made

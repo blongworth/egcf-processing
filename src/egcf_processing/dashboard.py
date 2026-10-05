@@ -201,43 +201,82 @@ def align_slider_bounds(lo: datetime, hi: datetime, step: timedelta) -> tuple[da
     return lo, lo + step * steps
 
 
+def snap_range_to_steps(
+    start: datetime, end: datetime, lo: datetime, hi: datetime, step: timedelta
+) -> tuple[datetime, datetime]:
+    """Clamp [start, end] to [lo, hi] and widen it onto the slider's ``lo + k * step`` grid."""
+    start, end = max(lo, min(start, hi)), max(lo, min(end, hi))
+    snapped_start = lo + step * ((start - lo) // step)
+    snapped_end = lo + step * -((lo - end) // step)
+    return snapped_start, min(snapped_end, hi)
+
+
+_LAST_TIME_RANGE_KEY = "time_range_last"
+_CUSTOM_SEED_KEY = "time_range_custom_seed"
+_CUSTOM_DAYS_KEY = "time_range_days"
+
+
+def _seed_custom_time_range() -> None:
+    """On switching the preset to Custom, start from the range that was just showing."""
+    last = st.session_state.get(_LAST_TIME_RANGE_KEY)
+    if st.session_state["time_range_preset"] != CUSTOM_TIME_RANGE or last is None:
+        return
+    st.session_state[_CUSTOM_DAYS_KEY] = (last[0].date(), last[1].date())
+    st.session_state[_CUSTOM_SEED_KEY] = last
+
+
+def _drop_custom_seed() -> None:
+    st.session_state.pop(_CUSTOM_SEED_KEY, None)
+
+
 def render_time_range_control(bounds: tuple[datetime, datetime]) -> tuple[datetime, datetime]:
     """Sidebar time-range picker: presets, plus a two-stage day + fine-time custom mode.
 
     A single slider over the whole deployment cannot resolve short windows (a
     39-day span is hours per pixel), so custom mode narrows by calendar day
     first and only then offers a minute-resolution slider *within* those days.
+    Switching to custom mode starts both stages at the range that was showing,
+    not the full deployment.
     """
     lo, hi = bounds
     st.header("Time range")
     st.caption("Applies to every tab. Experiment Data and Metabolism keep the experiments that start in the range.")
     options = [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE]
     preset = st.selectbox(
-        "Preset", options, index=options.index(DEFAULT_TIME_RANGE_PRESET), key="time_range_preset"
+        "Preset",
+        options,
+        index=options.index(DEFAULT_TIME_RANGE_PRESET),
+        key="time_range_preset",
+        on_change=_seed_custom_time_range,
     )
 
     if preset != CUSTOM_TIME_RANGE:
         start, end = preset_time_range(preset, lo, hi)
     else:
+        days = st.session_state.get(_CUSTOM_DAYS_KEY) or (lo.date(), hi.date())
+        st.session_state[_CUSTOM_DAYS_KEY] = tuple(min(max(d, lo.date()), hi.date()) for d in days)
         dates = st.date_input(
             "Days",
-            value=(lo.date(), hi.date()),
             min_value=lo.date(),
             max_value=hi.date(),
-            key="time_range_days",
+            key=_CUSTOM_DAYS_KEY,
+            on_change=_drop_custom_seed,
         )
         day_lo, day_hi = date_range_bounds(dates, lo, hi)
         slider_lo, slider_hi = align_slider_bounds(day_lo, day_hi, _FINE_STEP)
+        seed = st.session_state.get(_CUSTOM_SEED_KEY)
+        initial = (slider_lo, slider_hi) if seed is None else snap_range_to_steps(*seed, slider_lo, slider_hi, _FINE_STEP)
         # Deliberately unkeyed: changing the day selection changes the widget's
         # min/max, and the reset back to the full selected span is what we want.
         start, end = st.slider(
             "Time within those days",
             min_value=slider_lo,
             max_value=slider_hi,
-            value=(slider_lo, slider_hi),
+            value=initial,
             step=_FINE_STEP,
         )
 
+    st.session_state[_LAST_TIME_RANGE_KEY] = (start, end)
     st.caption(f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}")
     return start, end
 
