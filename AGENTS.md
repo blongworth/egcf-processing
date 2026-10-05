@@ -329,7 +329,7 @@ enclosed sediment sees that times the fraction the chamber walls and lid pass.
 **Dashboard Metabolism tab** (`render_metabolism_tab`). This tab **recomputes** Layers C–E live
 from the Layer A tables (`live_metabolism`, mirroring `pipeline.run`). It does not read the saved
 `egcf_metabolism`/`egcf_fluxes`, so the sidebar settling time and chamber geometry apply here, as
-they do on the Experiment Data tab. Only the transmittance comes from the saved `egcf_pi_fit`
+they do on the Rates and Fluxes tab. Only the transmittance comes from the saved `egcf_pi_fit`
 (`saved_par_transmittance`, falling back to 1.0). The dark threshold, PAR coverage and min r² are
 the `metabolism` defaults, not whatever the pipeline was run with. On the real corpus the rebuild
 takes ~0.2 s, so it isn't cached. Because it starts from the unfiltered tables, GPP's R stays the
@@ -346,7 +346,7 @@ whole-deployment dark mean.
   caption.
 
 **Sidebar time range.** The preset defaults to "Last 7 days", anchored at the end of the data.
-Status and Measurements filter raw rows. Experiment Data and Metabolism instead filter whole
+Status and Measurements filter raw rows. Rates and Fluxes and Metabolism instead filter whole
 experiments by start time (`experiments_in_range`). Filtering the raw `valve` rows would cut
 incubations at the edges and renumber experiments away from the pipeline output. The cycle-average
 rate and flux-over-time plots cover only the in-range experiments.
@@ -488,9 +488,9 @@ pump RPM, plus total pressure only if `status.parquet` has any non-null
 `raw_total_pressure_current` — currently always empty against real data, so
 this is normally a "no data" message, not a bug), Measurements (RGA mass
 data plus scalup sonde data, all with a raw/Amps/Torr unit toggle (default Torr) reusing
-`aggregate.py`'s conversion constants), and Experiment Data (per-experiment
+`aggregate.py`'s conversion constants), Rates and Fluxes (per-experiment
 C1-vs-C2 comparison of one RGA mass or other variable against elapsed time,
-in minutes), and Metabolism (O2/H⁺ flux vs PAR with the P–I fit; see the PAR section). The status tab's "current" plot is deliberately
+in minutes, plus rates and benthic fluxes across experiments), and Metabolism (O2/H⁺ flux vs PAR with the P–I fit; see the PAR section). The status tab's "current" plot is deliberately
 `turbo_power_w` — there's no field literally named "current" in
 `STATUS_SCHEMA` besides the pressure ion current, which already gets its own
 plot; this was an explicit user choice, not a guess.
@@ -505,7 +505,7 @@ whole deployment (a one-day window over the ~1.2M-row real corpus cuts a rerun f
 ~0.35 s).
 
 Two deliberate exclusions: `render_overview` is given the *unfiltered* tables, since it describes
-the dataset rather than the view; and so is the Experiment Data tab, because it derives
+the dataset rather than the view; and so is the Rates and Fluxes tab, because it derives
 `experiment_number` live from the complete `valve` sequence and a truncated sequence would silently
 renumber experiments. The control is created *after* the data loads (its bounds depend on it) but
 rendered into a `st.sidebar.container()` reserved earlier, so it still appears directly below the
@@ -550,10 +550,10 @@ which is incubating: both chambers stay sealed for the whole experiment. `_shade
 draws **one shape per span in `yref="paper"` coordinates**, not one per (span, subplot): all
 subplots match the row-1 x axis, so a single band covers the whole stack, and a real deployment
 has ~1000 spans (× 7 panels would be ~7000 shapes for Plotly to render). Chamber colors come from
-the same `chamber_color_map` the Experiment Data tab uses, and a no-data marker trace per chamber
+the same `chamber_color_map` the Rates and Fluxes tab uses, and a no-data marker trace per chamber
 supplies the legend entry.
 
-The Experiment Data tab's own "Grain" radio (`Full data` / `Cycle averages`)
+The Rates and Fluxes tab's own "Grain" radio (`Full data` / `Cycle averages`)
 picks between `_render_experiment_full_data` and
 `_render_experiment_cycle_averages` -- both gated purely on the raw `valve`
 table being present, since **both grains are computed live by the dashboard
@@ -596,14 +596,14 @@ a cycle at the same elapsed time, collapsing them onto one x-position).
 (`#B0B0B0`) "dropped (settling)" trace instead of hiding them, while kept
 points still render per-chamber in their normal colors.
 
-Below the rate plot, **both grains** render a **Benthic flux** section
-(`_render_experiment_fluxes`), calling the same `flux.compute_fluxes()` the
+**Both grains** show benthic flux, calling the same `flux.compute_fluxes()` the
 pipeline uses against the live-built cycle-averaged table. It's deliberately
 independent of the Variable selectbox -- the flux quantities are a fixed set
-(see "Flux calculation"), not user-selected -- and the whole section is
-replaced by a prompt when either sidebar chamber volume/area is set to `0.0`. It has three parts:
+(see "Flux calculation"), not user-selected -- and it's replaced by a prompt
+when either sidebar chamber volume/area is set to `0.0`. It has three parts,
+split across the tab's two groups (see below):
 
-1. `_render_experiment_flux_chart` -- grouped bars of the selected experiment's
+1. `_render_experiment_flux_chart` (via `_render_selected_experiment_fluxes`) -- grouped bars of the selected experiment's
    flux, **one subplot per variable**. Not one grouped bar chart: the variables
    carry different units and magnitudes spanning four orders (oxygen ~1e1
    mmol m⁻² h⁻¹ beside h_ion ~1e-3), so on a shared axis everything but oxygen
@@ -649,12 +649,19 @@ one-point "fit" is undefined) rather than raising. `Full data` does not get
 a fit overlay -- fitting is deliberately scoped to cycle-averaged points,
 which are far less noisy than individual raw readings.
 
-The rates chart and the Benthic flux section render under **either grain**:
-`render_experiment_tab` builds the cycle-averaged table once
-(`_live_cycle_averages`, at the sidebar settling time). Each grain's renderer
-returns its selected `(experiment, variable, label, sci)`, and the tab draws
-both sections from cycle averages below whichever per-experiment plot is
-shown. Variable names match across grains (`oxygen_mgL`, `mass_2`, ...), so
+The tab is laid out in two bordered `st.container`s:
+- **Selected experiment**: the Grain radio, the Experiment and Variable
+  selectboxes, the per-experiment plot and its CSV download, then parts 1-2 of
+  the flux (that experiment's bars and table).
+- **Across experiments**: the per-experiment rate chart for the selected
+  variable, then part 3 (flux over time).
+
+Both groups render under **either grain**. `render_experiment_tab` builds the
+cycle-averaged table once (`_live_cycle_averages`, at the sidebar settling
+time) and computes the fluxes once. Each grain's renderer returns its selected
+`(experiment, variable, label, sci)`, and the tab fills the flux and rate parts
+from cycle averages whichever grain is shown. The tab no longer plots HOBO
+oxygen against the mesocosm; HOBO data is on the Measurements tab. Variable names match across grains (`oxygen_mgL`, `mass_2`, ...), so
 the Full data selection carries straight over. The shared Variable selectbox
 defaults to `oxygen_mgL` (`DEFAULT_EXPERIMENT_VARIABLE`) when it's offered.
 
@@ -701,7 +708,7 @@ normalize against.
 The Measurements tab's RGA panels are driven by one "RGA data source" radio
 (`Full RGA data` / `Chamber cycle averages`, only offering a source that's
 actually present in the loaded dataset) — there is deliberately no separate
-RGA-cycle-averaged panel; that grain is only exposed via the Experiment Data
+RGA-cycle-averaged panel; that grain is only exposed via the Rates and Fluxes
 tab's own grain toggle. Full RGA data renders as lines; chamber-cycle
 averages render as points (`mode="markers"`), since each point is one
 already-averaged cycle rather than a continuous signal. Whichever source is
@@ -735,10 +742,11 @@ manual click-through likely wouldn't have (this environment has no browser).
 
 ### Data quality (Status tab)
 
-The top of the Status tab reports missingness and gross-range flags over the sidebar time range,
-computed by `qc.py` (no Streamlit, unit-tested in `tests/test_qc.py`) on the *filtered* tables. It
-renders before the status/system_health empty-state return, so it still shows when only scalup or
-rga data exists. It only reports; nothing is dropped or written back to the pipeline outputs.
+The Status tab has two same-level sections: "Status data" (the linked status/system-health plots,
+`_render_status_data`), then "Data quality". Data quality reports missingness and gross-range flags
+over the sidebar time range, computed by `qc.py` (no Streamlit, unit-tested in `tests/test_qc.py`)
+on the *filtered* tables. `_render_status_data`'s empty-state return doesn't skip it, so it still
+shows when only scalup or rga data exists. It only reports; nothing is dropped or written back to the pipeline outputs.
 
 - **`STREAM_CADENCE`**: `(table, group_col, nominal_interval_s, gap_threshold_s)` per Layer A
   stream, from the observed median spacing. Grouped streams (`rga` per `mass`, `hobo_oxygen` per

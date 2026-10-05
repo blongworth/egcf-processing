@@ -241,7 +241,7 @@ def render_time_range_control(bounds: tuple[datetime, datetime]) -> tuple[dateti
     """
     lo, hi = bounds
     st.header("Time range")
-    st.caption("Applies to every tab. Experiment Data and Metabolism keep the experiments that start in the range.")
+    st.caption("Applies to every tab. Rates and Fluxes and Metabolism keep the experiments that start in the range.")
     options = [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE]
     preset = st.selectbox(
         "Preset",
@@ -815,8 +815,12 @@ def render_status_tab(
     total_pressure_sensitivity: float,
     time_range: tuple[datetime, datetime] | None = None,
 ) -> None:
+    st.subheader("Status data")
+    _render_status_data(tables, total_pressure_sensitivity)
     render_data_quality(tables, time_range)
 
+
+def _render_status_data(tables: dict[str, pl.DataFrame | None], total_pressure_sensitivity: float) -> None:
     status = tables["status"]
     system_health = tables["system_health"]
     have_status = status is not None and not status.is_empty()
@@ -1141,7 +1145,6 @@ def _render_experiment_full_data(
     scalup: pl.DataFrame | None,
     status: pl.DataFrame | None,
     valve: pl.DataFrame,
-    hobo: pl.DataFrame | None,
     total_pressure_sensitivity: float,
     settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
     time_range: tuple[datetime, datetime] | None = None,
@@ -1242,83 +1245,7 @@ def _render_experiment_full_data(
         file_name=f"experiment_{experiment}_{download_name}.csv",
         mime="text/csv",
     )
-
-    _render_experiment_hobo_oxygen(
-        hobo, exp_scalup if have_scalup else None, exp_windows, experiment, experiment_start
-    )
     return experiment, variable, variable_label, col_is_sci
-
-
-def _render_experiment_hobo_oxygen(
-    hobo: pl.DataFrame | None,
-    exp_scalup: pl.DataFrame | None,
-    exp_windows: pl.DataFrame,
-    experiment: str,
-    experiment_start: datetime,
-) -> None:
-    """HOBO (+ SCALUP) oxygen per chamber against the mesocosm and ambient references.
-
-    See _render_hobo_mesocosm_diff (Measurements tab) for the mesocosm-minus-chamber
-    difference plot -- that one covers the whole deployment rather than one experiment.
-    """
-    if hobo is None or hobo.is_empty():
-        _empty_state("HOBO oxygen")
-        return
-
-    experiment_end = exp_windows["window_end"].max()
-    exp_hobo = hobo.filter((pl.col("ts") >= experiment_start) & (pl.col("ts") < experiment_end)).with_columns(
-        ((pl.col("ts") - experiment_start).dt.total_seconds() / 60).alias("elapsed_time_min")
-    )
-    if exp_hobo.is_empty():
-        st.info("No HOBO oxygen readings in this experiment's time range.")
-        return
-
-    locations = exp_hobo["location"].unique().to_list()
-    chambers = _hobo_chambers(locations)
-    colors = _hobo_location_colors(exp_hobo)
-    references = {
-        loc: exp_hobo.filter(pl.col("location") == loc).sort("ts")
-        for loc in _HOBO_REFERENCE_COLORS
-        if loc in locations
-    }
-
-    sections: list[tuple[str, list[go.Scatter], bool, bool]] = []
-    for chamber in chambers:
-        hobo_c = exp_hobo.filter(pl.col("location") == chamber)
-        traces = [
-            go.Scatter(
-                x=hobo_c["elapsed_time_min"],
-                y=hobo_c["oxygen_mgl"],
-                mode="lines",
-                name=f"{chamber} HOBO",
-                line={"color": colors[chamber]},
-            )
-        ]
-        if exp_scalup is not None:
-            scalup_c = exp_scalup.filter(pl.col("chamber") == chamber)
-            if not scalup_c.is_empty():
-                traces.append(
-                    go.Scatter(
-                        x=(scalup_c["ts"] - experiment_start).dt.total_seconds() / 60,
-                        y=scalup_c["oxygen_mgl"],
-                        mode="lines",
-                        name=f"{chamber} SCALUP",
-                        line={"color": colors[chamber], "dash": "dash"},
-                    )
-                )
-        traces += [
-            go.Scatter(
-                x=ref["elapsed_time_min"],
-                y=ref["oxygen_mgl"],
-                mode="lines",
-                name=f"{loc} HOBO",
-                line={"color": colors[loc], "dash": "dot"},
-            )
-            for loc, ref in references.items()
-        ]
-        sections.append((f"{chamber} oxygen (mg/L)", traces, False, False))
-
-    _render_linked_timeseries(sections, title=f"Experiment {experiment}: oxygen vs mesocosm")
 
 
 def _render_experiment_cycle_averages(
@@ -1403,44 +1330,25 @@ def _render_experiment_cycle_averages(
     return experiment, variable, variable_label, col_is_sci
 
 
-def _render_experiment_fluxes(
-    with_experiment: pl.DataFrame,
-    experiment: str,
-    chamber_volume_l: float,
-    chamber_area_m2: float,
-) -> None:
-    """Show benthic flux: the selected experiment, then the whole deployment.
+def _render_selected_experiment_fluxes(all_fluxes: pl.DataFrame | None, experiment: str) -> None:
+    """The selected experiment's benthic fluxes: a bar per chamber and variable, plus the fit table.
 
-    Independent of the Variable selectbox above -- these are a fixed set of
-    quantities (see flux.compute_fluxes), not user-selected ones.
-
-    The deployment-wide plot renders even when the *selected* experiment has
-    no fittable cycle, so landing on a thin experiment (experiment 1 in the
-    real corpus has one cycle per chamber) no longer looks like "no flux data"
-    when fits exist elsewhere in the deployment.
+    Independent of the Variable selectbox -- these are a fixed set of
+    quantities (see flux.compute_fluxes), not user-selected ones. ``all_fluxes``
+    is None when the sidebar geometry is zeroed out.
     """
-    st.subheader("Benthic flux")
-    if chamber_volume_l <= 0 or chamber_area_m2 <= 0:
+    if all_fluxes is None:
         st.info("Enter the chamber volume and sediment footprint area in the sidebar to compute flux.")
         return
-    all_fluxes = compute_fluxes(with_experiment, chamber_volume_l, chamber_area_m2)
-    if all_fluxes.is_empty():
-        st.info("Not enough cycles in any experiment to fit a flux.")
-        return
-
     this_exp = all_fluxes.filter(pl.col("experiment_number").cast(pl.Utf8) == experiment)
     if this_exp.is_empty():
-        st.info("Not enough cycles in this experiment to fit a flux -- see the deployment-wide plot below.")
-    else:
-        _render_experiment_flux_chart(this_exp, experiment)
-        st.dataframe(
-            this_exp.select(
-                "chamber", "variable", "output_value", "output_unit", "slope_native_per_min", "r2", "n_points"
-            ),
-            width="stretch",
-        )
-
-    _render_flux_over_time(all_fluxes)
+        st.info("Not enough cycles in this experiment to fit a flux -- see the across-experiments plots below.")
+        return
+    _render_experiment_flux_chart(this_exp, experiment)
+    st.dataframe(
+        this_exp.select("chamber", "variable", "output_value", "output_unit", "slope_native_per_min", "r2", "n_points"),
+        width="stretch",
+    )
 
 
 def _render_experiment_flux_chart(exp_fluxes: pl.DataFrame, experiment: str) -> None:
@@ -1638,27 +1546,28 @@ def render_experiment_tab(
     scalup = tables["scalup"]
     status = tables["status"]
     valve = tables["valve"]
-    hobo = tables["hobo_oxygen"]
 
     if valve is None or valve.is_empty():
         _empty_state("experiment")
         return
 
-    grain = st.radio("Grain", ["Full data", "Cycle averages"], horizontal=True, key="experiment_grain")
     cycles = _live_cycle_averages(rga, scalup, status, valve, total_pressure_sensitivity, settle_offset_s)
-
-    if grain == "Full data":
-        selection = _render_experiment_full_data(
-            rga, scalup, status, valve, hobo, total_pressure_sensitivity, settle_offset_s, time_range
-        )
-    elif cycles is None:
-        st.info("No valid chamber cycles found in this dataset.")
-        return
-    elif cycles.is_empty():
-        st.info("No rows with a known experiment_number in this dataset.")
-        return
-    else:
-        selection = _render_experiment_cycle_averages(cycles, settle_offset_s, time_range)
+    selected_group = st.container(border=True)
+    with selected_group:
+        st.subheader("Selected experiment")
+        grain = st.radio("Grain", ["Full data", "Cycle averages"], horizontal=True, key="experiment_grain")
+        if grain == "Full data":
+            selection = _render_experiment_full_data(
+                rga, scalup, status, valve, total_pressure_sensitivity, settle_offset_s, time_range
+            )
+        elif cycles is None:
+            st.info("No valid chamber cycles found in this dataset.")
+            return
+        elif cycles.is_empty():
+            st.info("No rows with a known experiment_number in this dataset.")
+            return
+        else:
+            selection = _render_experiment_cycle_averages(cycles, settle_offset_s, time_range)
     if selection is None or cycles is None or cycles.is_empty():
         return
 
@@ -1666,9 +1575,24 @@ def render_experiment_tab(
     experiment, variable, variable_label, col_is_sci = selection
     _, experiments = cycle_experiments_in_range(cycles, settle_offset_s, time_range)
     in_range = cycles.filter(pl.col("experiment_number").is_in(experiments))
-    rates_df = experiment_rates(in_range, variable, variable.startswith("mass_"))
-    _render_experiment_rates_plot(rates_df, variable_label, col_is_sci)
-    _render_experiment_fluxes(in_range, experiment, chamber_volume_l, chamber_area_m2)
+    all_fluxes = (
+        compute_fluxes(in_range, chamber_volume_l, chamber_area_m2)
+        if chamber_volume_l > 0 and chamber_area_m2 > 0
+        else None
+    )
+    with selected_group:
+        _render_selected_experiment_fluxes(all_fluxes, experiment)
+
+    with st.container(border=True):
+        st.subheader("Across experiments")
+        rates_df = experiment_rates(in_range, variable, variable.startswith("mass_"))
+        _render_experiment_rates_plot(rates_df, variable_label, col_is_sci)
+        if all_fluxes is None:
+            return
+        if all_fluxes.is_empty():
+            st.info("Not enough cycles in any experiment to fit a flux.")
+            return
+        _render_flux_over_time(all_fluxes)
 
 
 def _pi_curve_traces(pi_fit: pl.DataFrame | None, par_max: float, colors: dict[str, str]) -> list[go.Scatter]:
@@ -1933,7 +1857,7 @@ def main() -> None:
         plot_tables = filter_tables_to_range(tables, *time_range)
 
     status_tab, measurements_tab, experiment_tab, metabolism_tab = st.tabs(
-        ["Status", "Measurements", "Experiment Data", "Metabolism"]
+        ["Status", "Measurements", "Rates and Fluxes", "Metabolism"]
     )
     with status_tab:
         render_status_tab(plot_tables, total_pressure_sensitivity, time_range)

@@ -430,12 +430,9 @@ def test_hobo_oxygen_comparison_and_mesocosm_diff_plots(tmp_path):
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     assert not at.exception
 
+    # HOBO oxygen is a Measurements-tab view only; Rates and Fluxes doesn't plot it.
     experiment_specs = [c.proto.spec for c in at.tabs[2].get("plotly_chart")]
-    assert any("oxygen vs mesocosm" in spec for spec in experiment_specs)
-    assert not any("mesocosm minus chamber oxygen" in spec for spec in experiment_specs)
-    experiment_traces = [d["name"] for spec in experiment_specs for d in json.loads(spec)["data"]]
-    assert "ambient HOBO" in experiment_traces
-    assert "ambient oxygen (mg/L)" not in " ".join(experiment_specs)
+    assert not any("mesocosm" in spec.lower() for spec in experiment_specs)
 
     measurements_specs = [c.proto.spec for c in at.tabs[1].get("plotly_chart")]
     combined_measurements_spec = " ".join(measurements_specs)
@@ -523,7 +520,7 @@ def test_flux_over_time_renders_even_when_selected_experiment_has_no_fit(tmp_pat
     tab = at.tabs[2]
     # The selectbox value is the bare experiment number; only its label is formatted.
     assert tab.selectbox(key="experiment_number").value == "1"
-    assert any("see the deployment-wide plot below" in i.value for i in tab.info)
+    assert any("see the across-experiments plots below" in i.value for i in tab.info)
     assert not tab.dataframe  # no per-experiment table for the thin experiment
     spec = _flux_over_time_spec(tab)
     assert spec is not None and spec["data"]
@@ -537,14 +534,18 @@ def test_experiment_tab_shows_rates_and_fluxes_in_either_grain(tmp_path, grain):
     at.run(timeout=60)
     at.sidebar.text_input[0].set_value(str(tmp_path)).run(timeout=60)
     at.tabs[2].radio(key="experiment_grain").set_value(grain).run(timeout=60)
+    at.tabs[2].selectbox(key="experiment_number").set_value("2").run(timeout=60)
     assert not at.exception
 
     tab = at.tabs[2]
     assert tab.selectbox(key="experiment_variable").value == "oxygen_mgL"
-    titles = [json.loads(c.proto.spec)["layout"].get("title", {}).get("text") for c in tab.get("plotly_chart")]
-    assert "oxygen_mgL rate per experiment" in titles
-    assert "Benthic flux" in [h.value for h in tab.subheader]
-    assert _flux_over_time_spec(tab) is not None
+    assert [h.value for h in tab.subheader] == ["Selected experiment", "Across experiments"]
+    selected, across = list(tab.children.values())
+    selected_titles = [json.loads(c.proto.spec)["layout"]["title"]["text"] for c in selected.get("plotly_chart")]
+    assert selected_titles[0].startswith("Experiment 2: oxygen_mgL vs elapsed time")
+    assert selected_titles[1] == "Experiment 2: flux by variable"
+    across_titles = [json.loads(c.proto.spec)["layout"]["title"]["text"] for c in across.get("plotly_chart")]
+    assert across_titles == ["oxygen_mgL rate per experiment", "Flux over time"]
 
 
 def test_flux_variable_selector_filters_the_flux_over_time_subplots(tmp_path):
@@ -1010,7 +1011,7 @@ def test_status_tab_data_quality_reports_gaps_and_range_flags(tmp_path):
     _write_scalup_with_bad_ph(tmp_path)
 
     _at, tab = _status_tab_spec(tmp_path)
-    assert "Data quality" in [h.value for h in tab.get("subheader")]
+    assert [h.value for h in tab.get("subheader")] == ["Status data", "Data quality"]
     completeness, summary = [d.value for d in tab.dataframe][:2]
     status_row = completeness[completeness["stream"] == "status"].iloc[0]
     assert status_row["n_gaps"] == 1
@@ -1029,7 +1030,7 @@ def test_status_tab_data_quality_renders_without_status_tables(tmp_path):
     _write_scalup_with_bad_ph(tmp_path)
 
     _at, tab = _status_tab_spec(tmp_path)
-    assert "Data quality" in [h.value for h in tab.get("subheader")]
+    assert [h.value for h in tab.get("subheader")] == ["Status data", "Data quality"]
     assert "No status data" in tab.get("info")[0].value
 
 
