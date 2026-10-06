@@ -1,13 +1,15 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["pyserial"]
+# dependencies = ["pyserial", "rich"]
 # ///
 """Step the turbo setpoint on a schedule for the overnight RGA performance test.
 
 Sends SPD<speed>\\n down from --start to --stop and back up in --step increments
-(the turnaround speed is sent once), one command every --interval-s. Every command
-and response is logged with a UTC timestamp to stdout and to --log, in the
-"<iso_ts> <direction> <payload>" form that turbo_speed_analysis.py --commands-log reads.
+(the turnaround speed is sent once): the first command immediately, then one every
+--interval-s, anchored to a monotonic start time. Serial input is printed as it
+arrives, with a status line pinned at the bottom. Every send and received line is
+appended to --log as "<iso_ts> <direction> <payload>", the form that
+turbo_speed_analysis.py --commands-log reads.
 
     uv run scripts/turbo_speed_stepper.py --port /dev/tty.usbserial-XXXX
 """
@@ -16,8 +18,12 @@ from __future__ import annotations
 
 import argparse
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from rich.console import Console
+from rich.live import Live
+from rich.text import Text
 
 
 def build_schedule(start: int, stop: int, step: int) -> list[int]:
@@ -28,27 +34,40 @@ def build_schedule(start: int, stop: int, step: int) -> list[int]:
     return leg + leg[-2::-1]
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _log(log_file, direction: str, payload: str) -> None:
-    line = f"{_now()} {direction} {payload}"
-    print(line, flush=True)
-    log_file.write(line + "\n")
-    log_file.flush()
+class Stepper:
+    def __init__(self, schedule: list[int], interval_s: float, log_file, console: Console):
+        self.schedule = schedule
+        self.interval_s = interval_s
+        self.log_file = log_file
+        self.console = console
+        self.t0 = time.monotonic()
+        self.wall0 = datetime.now(timezone.utc)
+        self.next_i = 0
+        self.last: str = "none sent yet"
 
+    def log(self, direction: str, payload: str) -> None:
+        line = f"{_iso(datetime.now(timezone.utc))} {direction} {payload}"
+        self.log_file.write(line + "\n")
+        self.log_file.flush()
 
-def _read_response(ser, timeout_s: float) -> list[str]:
-    lines = []
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if raw:
-            text = raw.decode("utf-8", errors="replace").strip()
-            if text:
-                lines.append(text)
-    return lines
+    def due(self) -> bool:
+        return self.next_i < len(self.schedule) and time.monotonic() >= self.t0 + self.next_i * self.interval_s
+
+    def done(self) -> bool:
+        return self.next_i >= len(self.schedule)
+
+    def status(self) -> Text:
+        n = len(self.schedule)
+        if self.done():
+            nxt = "schedule complete (Ctrl-C to exit)"
+        else:
+            at = self.wall0 + timedelta(seconds=self.next_i * self.interval_s)
+            nxt = f"next: SPD{self.schedule[self.next_i]} @ {at.strftime('%H:%M:%SZ')} (step {self.next_i + 1}/{n})"
+        return Text(f"Last: {self.last} | {nxt}", style="bold reverse")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,43 +78,58 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start", type=int, default=1200)
     parser.add_argument("--stop", type=int, default=600)
     parser.add_argument("--step", type=int, default=100)
-    parser.add_argument("--response-s", type=float, default=3.0, help="seconds to read responses after each send")
     parser.add_argument("--log", type=Path, default=Path("turbo_speed_commands.log"))
-    parser.add_argument("--dry-run", action="store_true", help="print commands on schedule without opening the port")
+    parser.add_argument("--dry-run", action="store_true", help="run the schedule without opening the port")
+    parser.add_argument("--exit-when-done", action="store_true", help="quit after the last command instead of waiting for Ctrl-C")
     args = parser.parse_args(argv)
 
     schedule = build_schedule(args.start, args.stop, args.step)
-    print(f"schedule ({len(schedule)} commands, every {args.interval_s:g} s): {schedule}", flush=True)
+    console = Console()
+    console.print(f"schedule ({len(schedule)} commands, every {args.interval_s:g} s): {schedule}")
 
     ser = None
     if not args.dry_run:
         import serial
 
         ser = serial.Serial(args.port, args.baud, timeout=0.5)
-    t0 = time.monotonic()
-    try:
-        with args.log.open("a", encoding="utf-8") as log_file:
-            _log(log_file, "INFO", f"start port={args.port} dry_run={args.dry_run} schedule={schedule}")
-            for i, speed in enumerate(schedule):
-                delay = t0 + i * args.interval_s - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-                cmd = f"SPD{speed}"
-                _log(log_file, "SENT", cmd)
-                if ser is not None:
-                    ser.write(f"{cmd}\n".encode("ascii"))
-                    ser.flush()
-                    for line in _read_response(ser, args.response_s):
-                        _log(log_file, "RECV", line)
-            _log(log_file, "INFO", "schedule complete")
-    except KeyboardInterrupt:
-        print("interrupted; exiting without changing speed", flush=True)
-        with args.log.open("a", encoding="utf-8") as log_file:
-            _log(log_file, "INFO", "interrupted")
-        return 130
-    finally:
-        if ser is not None:
-            ser.close()
+
+    with args.log.open("a", encoding="utf-8") as log_file:
+        stepper = Stepper(schedule, args.interval_s, log_file, console)
+        stepper.log("INFO", f"start port={args.port} dry_run={args.dry_run} schedule={schedule}")
+        try:
+            with Live(stepper.status(), console=console, refresh_per_second=4, transient=False) as live:
+                while True:
+                    if stepper.due():
+                        cmd = f"SPD{schedule[stepper.next_i]}"
+                        if ser is not None:
+                            ser.write(f"{cmd}\n".encode("ascii"))
+                            ser.flush()
+                        stepper.log("SENT", cmd)
+                        sent_at = _iso(datetime.now(timezone.utc))
+                        live.console.print(f"[bold cyan]{sent_at} SENT {cmd}[/]")
+                        stepper.last = f"{cmd} @ {sent_at}"
+                        stepper.next_i += 1
+                        if stepper.done():
+                            stepper.log("INFO", "schedule complete")
+                        live.update(stepper.status())
+                    if stepper.done() and args.exit_when_done:
+                        break
+                    if ser is not None:
+                        raw = ser.readline()
+                        text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                        if text:
+                            stepper.log("RECV", text)
+                            live.console.print(Text(text))
+                    else:
+                        time.sleep(0.5 if args.interval_s >= 0.5 else 0.05)
+                    live.update(stepper.status())
+        except KeyboardInterrupt:
+            stepper.log("INFO", "interrupted")
+            console.print("interrupted; exiting without changing speed")
+            return 130
+        finally:
+            if ser is not None:
+                ser.close()
     return 0
 
 
