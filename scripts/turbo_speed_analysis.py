@@ -1,6 +1,6 @@
 """Turbo-speed RGA performance test: tag RGA/TP readings with the turbo setpoint in
-effect, drop a settle period after each change, and report per-mass mean/RSD per
-speed plus speed vs total pressure.
+effect, drop a settle period after acquisition restarts (OK,AON) following each
+change, and report per-mass mean/RSD per speed plus speed vs total pressure.
 
     uv run scripts/turbo_speed_analysis.py <raw_dir> --out-dir <dir> [--settle-min 10]
 """
@@ -30,6 +30,7 @@ from egcf_processing.reader import read_all
 
 _CMD_RE = re.compile(r"\bSPD(\d{3,4})\b")
 _ACK_RE = re.compile(r"\bOK,SPD(\d{3,4})?\b")
+_AON_RE = re.compile(r"\bOK,AON\b")
 _LEADING_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)")
 _TS_KEYS = {"SPD": "speed_hz", "PWR": "power_w", "ETEMP": "etemp_c", "BTEMP": "btemp_c", "MTEMP": "mtemp_c", "TP": "tp_raw"}
 
@@ -88,14 +89,17 @@ def _iter_timestamped_lines(raw_dir: Path, commands_log: Path | None):
                     yield ts, parts[2], path.name
 
 
-def scan_raw(raw_dir: Path, commands_log: Path | None) -> tuple[list[dict], list[dict], list[dict]]:
-    """Return (commands, acks, ts_rows) found in the raw lines."""
-    commands, acks, ts_rows = [], [], []
+def scan_raw(raw_dir: Path, commands_log: Path | None) -> tuple[list[dict], list[dict], list[datetime], list[dict]]:
+    """Return (commands, acks, aon_acks, ts_rows) found in the raw lines."""
+    commands, acks, aon_acks, ts_rows = [], [], [], []
     for ts, payload, source_file in _iter_timestamped_lines(raw_dir, commands_log):
         ack = _ACK_RE.search(payload)
         if ack:
             setpoint = int(ack.group(1)) if ack.group(1) else None
             acks.append({"ts": ts, "setpoint": setpoint, "source_file": source_file})
+            continue
+        if _AON_RE.search(payload):
+            aon_acks.append(ts)
             continue
         cmd = _CMD_RE.search(payload)
         if cmd:
@@ -111,7 +115,7 @@ def scan_raw(raw_dir: Path, commands_log: Path | None) -> tuple[list[dict], list
                     except ValueError:
                         row[_TS_KEYS[key]] = None
             ts_rows.append(row)
-    return commands, acks, ts_rows
+    return commands, acks, aon_acks, ts_rows
 
 
 def build_speed_changes(commands: list[dict], acks: list[dict], ack_window_s: float) -> pl.DataFrame:
@@ -199,17 +203,46 @@ def build_turbo(ts_rows: list[dict], status: pl.DataFrame) -> pl.DataFrame:
     return pl.concat([ts_df, status_df]).filter(pl.col("tp_raw").is_not_null() | pl.col("speed_hz").is_not_null())
 
 
+def add_acq_on(changes: pl.DataFrame, aon_acks: list[datetime]) -> pl.DataFrame:
+    """Attach the first OK,AON after each change and before the next one as acq_on_ts.
+
+    The speed is changed with acquisition off (AOFF, SPD, wait for TURBO=ready, AON), so
+    the settle period is timed from acquisition restarting. A change with no AON ack
+    falls back to the change time, with a warning.
+    """
+    aon = pl.DataFrame({"acq_on_ts": sorted(set(aon_acks))}, schema={"acq_on_ts": pl.Datetime})
+    out = (
+        changes.sort("ts")
+        .join_asof(aon, left_on="ts", right_on="acq_on_ts", strategy="forward")
+        .with_columns(
+            pl.when(pl.col("ts").shift(-1).is_null() | (pl.col("acq_on_ts") < pl.col("ts").shift(-1)))
+            .then(pl.col("acq_on_ts"))
+            .alias("acq_on_ts")
+        )
+    )
+    for row in out.filter(pl.col("acq_on_ts").is_null()).iter_rows(named=True):
+        print(
+            f"WARNING: SPD{row['setpoint']} change at {row['ts']} has no OK,AON before the next change; "
+            "settle timed from the change instead",
+            file=sys.stderr,
+        )
+    return out
+
+
 def tag(readings: pl.DataFrame, changes: pl.DataFrame, settle_s: float) -> pl.DataFrame:
     """Attach the setpoint in effect to each reading; drop readings before the first change."""
     right = changes.select(
-        pl.col("ts").alias("change_ts"), "setpoint", "segment", "leg", pl.col("source").alias("change_source")
+        pl.col("ts").alias("change_ts"), "acq_on_ts", "setpoint", "segment", "leg", pl.col("source").alias("change_source")
     )
     tagged = readings.sort("ts").join_asof(right, left_on="ts", right_on="change_ts", strategy="backward")
     t_since = (pl.col("ts") - pl.col("change_ts")).dt.total_microseconds() / 1e6
     return (
         tagged.filter(pl.col("setpoint").is_not_null())
-        .with_columns(t_since.alias("t_since_change_s"))
-        .with_columns((pl.col("t_since_change_s") < settle_s).alias("in_settle"))
+        .with_columns(
+            t_since.alias("t_since_change_s"),
+            ((pl.col("ts") - pl.coalesce("acq_on_ts", "change_ts")).dt.total_microseconds() / 1e6).alias("t_since_acq_on_s"),
+        )
+        .with_columns((pl.col("t_since_acq_on_s") < settle_s).alias("in_settle"))
     )
 
 
@@ -285,8 +318,9 @@ def fig_timeseries(turbo_tagged: pl.DataFrame, changes: pl.DataFrame, settle_s: 
         go.Scatter(x=step_x, y=step_y, mode="lines", line={"shape": "hv", "width": 2, "color": "#eb6834"}, name="setpoint"),
         row=3, col=1,
     )
-    for ts in changes["ts"].to_list():
-        fig.add_vrect(x0=ts, x1=ts + timedelta(seconds=settle_s), fillcolor="#8a8984", opacity=0.15, line_width=0)
+    for ts, acq_on in changes.select("ts", "acq_on_ts").iter_rows():
+        settle_end = (acq_on or ts) + timedelta(seconds=settle_s)
+        fig.add_vrect(x0=ts, x1=settle_end, fillcolor="#8a8984", opacity=0.15, line_width=0)
     fig.update_yaxes(title_text="TP (Torr)", type="log", row=1, col=1)
     fig.update_yaxes(title_text="measured speed (Hz)", row=2, col=1)
     fig.update_yaxes(title_text="setpoint", row=3, col=1)
@@ -384,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("raw_dir", type=Path)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--settle-min", type=float, default=10.0, help="minutes dropped after each speed change (default 10)")
+    parser.add_argument("--settle-min", type=float, default=10.0, help="minutes dropped after acquisition restarts (OK,AON) following each speed change (default 10)")
     parser.add_argument("--start", type=_parse_iso, help="ignore readings before this ISO time (UTC)")
     parser.add_argument("--end", type=_parse_iso, help="ignore readings and changes after this ISO time (UTC)")
     parser.add_argument("--commands-log", type=Path, help="turbo_speed_commands.log from the stepper, as an extra event source")
@@ -396,10 +430,11 @@ def main(argv: list[str] | None = None) -> int:
     settle_s = args.settle_min * 60
 
     tables = build_tables(read_all(find_all_files(args.raw_dir)))
-    commands, acks, ts_rows = scan_raw(args.raw_dir, args.commands_log)
+    commands, acks, aon_acks, ts_rows = scan_raw(args.raw_dir, args.commands_log)
     changes = build_speed_changes(commands, acks, args.ack_window_s)
     if args.end is not None:
         changes = add_segments(changes.filter(pl.col("ts") <= args.end).drop("segment", "leg"))
+    changes = add_acq_on(changes, aon_acks)
     print(f"found {len(commands)} SPD command sightings, {len(acks)} OK,SPD acks -> {changes.height} speed changes")
     if changes.is_empty():
         print("No speed changes found; nothing to analyse.", file=sys.stderr)
