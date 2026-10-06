@@ -10,12 +10,11 @@ step starts --interval-s after the previous step's AON was sent, so every speed 
 a full interval of acquisition. The speed can't be changed while acquiring, so each
 step runs:
 
-    AOFF -> (OK,AOFF) -> SPD#### -> (OK,SPD) -> poll S until TURBO=ready -> AON -> (OK,AON)
+    AOFF -> (OK,AOFF) -> SPD#### -> (OK,SPD) -> poll TSTAT until SPD=#### -> AON -> (OK,AON)
 
-An unacknowledged AOFF/SPD/AON is resent every --ack-timeout-s. S is polled every
---poll-s, and TURBO=ready only counts once --min-spin-s has passed since the SPD ack,
-so a stale "ready" from before the change isn't trusted. AON is never sent until the
-turbo reports ready, and the next step waits for it, however long that takes.
+An unacknowledged AOFF/SPD/AON is resent every --ack-timeout-s. TSTAT is polled every
+--poll-s until its reply shows SPD= equal to the setpoint. AON is never sent until the
+turbo is at speed, and the next step waits for it, however long that takes.
 Serial input is printed as it arrives, with a status line pinned
 at the bottom. Every send and received line is appended to --log as
 "<iso_ts> <direction> <payload>", the form that turbo_speed_analysis.py
@@ -37,7 +36,7 @@ from rich.live import Live
 from rich.text import Text
 
 _OK_RE = re.compile(r"\bOK,(AOFF|AON|SPD)")
-_READY_RE = re.compile(r"\bS,.*\bTURBO=ready\b")
+_SPD_RE = re.compile(r"\bSPD=(\d+)")
 
 
 def build_schedule(start: int, stop: int, step: int) -> list[int]:
@@ -52,9 +51,9 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _dry_run_reply(cmd: str) -> str:
-    if cmd == "S":
-        return "S,Off,SPD=0,TURBO=ready,RGA=off"
+def _dry_run_reply(cmd: str, setpoint: int | None) -> str:
+    if cmd == "TSTAT":
+        return f"TS,ERR=0,SPD={setpoint},PWR=0,ETEMP=0,BTEMP=0,MTEMP=0,TP=0"
     return f"OK,{cmd}"
 
 
@@ -90,7 +89,7 @@ class Stepper:
 
     def send(self, cmd: str) -> None:
         self.log("SENT", cmd)
-        if cmd != "S":
+        if cmd != "TSTAT":
             self.console.print(f"[bold cyan]{_iso(datetime.now(timezone.utc))} SENT {cmd}[/]")
         self.send_raw(cmd)
 
@@ -119,7 +118,7 @@ class Stepper:
         elif self.phase == "ready" and now >= self.next_poll:
             self.next_poll = now + self.args.poll_s
             self.polls += 1
-            self.send("S")
+            self.send("TSTAT")
 
     def on_line(self, text: str) -> None:
         now = time.monotonic()
@@ -130,8 +129,8 @@ class Stepper:
         elif self.phase == "spd" and ok and ok.group(1) == "SPD":
             self.phase = "ready"
             self.spd_ok_at = now
-            self.next_poll = now + self.args.min_spin_s
-        elif self.phase == "ready" and _READY_RE.search(text) and now - self.spd_ok_at >= self.args.min_spin_s:
+            self.next_poll = now
+        elif self.phase == "ready" and (spd := _SPD_RE.search(text)) and int(spd.group(1)) == self.setpoint:
             self.phase = "aon"
             self._command("AON")
             self.next_due = now + self.args.interval_s
@@ -140,7 +139,7 @@ class Stepper:
         elif self.phase == "aon" and ok and ok.group(1) == "AON":
             self.phase = "idle"
             self.completed += 1
-            self.note(f"step SPD{self.setpoint} complete: turbo ready, acquisition on", style="green")
+            self.note(f"step SPD{self.setpoint} complete: turbo at speed, acquisition on", style="green")
             if self.next_i >= len(self.schedule):
                 self.note("schedule complete", style="green")
 
@@ -150,7 +149,7 @@ class Stepper:
         waiting = {
             "aoff": "waiting for OK,AOFF",
             "spd": f"waiting for OK,SPD{self.setpoint}",
-            "ready": f"waiting for TURBO=ready ({self.polls} S polls, {now - self.spd_ok_at:.0f} s)",
+            "ready": f"waiting for SPD={self.setpoint} ({self.polls} TSTAT polls, {now - self.spd_ok_at:.0f} s)",
             "aon": "waiting for OK,AON",
         }
         parts = [f"Last: {self.last}"]
@@ -176,8 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop", type=int, default=600)
     parser.add_argument("--step", type=int, default=100)
     parser.add_argument("--ack-timeout-s", type=float, default=30.0, help="resend AOFF/SPD/AON if no OK within this (default 30)")
-    parser.add_argument("--poll-s", type=float, default=10.0, help="S poll interval while waiting for TURBO=ready (default 10)")
-    parser.add_argument("--min-spin-s", type=float, default=30.0, help="ignore TURBO=ready until this long after the SPD ack (default 30)")
+    parser.add_argument("--poll-s", type=float, default=10.0, help="TSTAT poll interval while waiting for the turbo to reach speed (default 10)")
     parser.add_argument("--log", type=Path, default=Path("turbo_speed_commands.log"))
     parser.add_argument("--dry-run", action="store_true", help="run the schedule without opening the port; replies are simulated")
     parser.add_argument("--exit-when-done", action="store_true", help="quit after the last step instead of waiting for Ctrl-C")
@@ -198,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         if ser is not None:
             ser.write(f"{cmd}\n".encode("ascii"))
         else:
-            pending.append(_dry_run_reply(cmd))
+            pending.append(_dry_run_reply(cmd, stepper.setpoint))
 
     with args.log.open("a", encoding="utf-8") as log_file:
         try:
