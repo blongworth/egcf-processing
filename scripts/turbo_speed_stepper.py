@@ -103,7 +103,6 @@ def main(argv: list[str] | None = None) -> int:
                         cmd = f"SPD{schedule[stepper.next_i]}"
                         if ser is not None:
                             ser.write(f"{cmd}\n".encode("ascii"))
-                            ser.flush()
                         stepper.log("SENT", cmd)
                         sent_at = _iso(datetime.now(timezone.utc))
                         live.console.print(f"[bold cyan]{sent_at} SENT {cmd}[/]")
