@@ -10,10 +10,10 @@ step starts --interval-s after the previous step's AON was sent, so every speed 
 a full interval of acquisition. The speed can't be changed while acquiring, so each
 step runs:
 
-    AOFF -> (OK,AOFF) -> SPD#### -> (OK,SPD) -> poll TSTAT until SPD=#### -> AON -> (OK,AON)
+    AOFF -> (OK,AOFF) -> SPD#### -> (OK,SPD) -> poll TSTAT until SPD=#### (±--spd-tolerance) -> AON -> (OK,AON)
 
 An unacknowledged AOFF/SPD/AON is resent every --ack-timeout-s. TSTAT is polled every
---poll-s until its reply shows SPD= equal to the setpoint. AON is never sent until the
+--poll-s until its reply shows SPD= within --spd-tolerance of the setpoint. AON is never sent until the
 turbo is at speed, and the next step waits for it, however long that takes.
 Serial input is printed as it arrives, with a status line pinned
 at the bottom. Every send and received line is appended to --log as
@@ -130,7 +130,7 @@ class Stepper:
             self.phase = "ready"
             self.spd_ok_at = now
             self.next_poll = now
-        elif self.phase == "ready" and (spd := _SPD_RE.search(text)) and int(spd.group(1)) == self.setpoint:
+        elif self.phase == "ready" and (spd := _SPD_RE.search(text)) and abs(int(spd.group(1)) - self.setpoint) <= self.args.spd_tolerance:
             self.phase = "aon"
             self._command("AON")
             self.next_due = now + self.args.interval_s
@@ -149,7 +149,7 @@ class Stepper:
         waiting = {
             "aoff": "waiting for OK,AOFF",
             "spd": f"waiting for OK,SPD{self.setpoint}",
-            "ready": f"waiting for SPD={self.setpoint} ({self.polls} TSTAT polls, {now - self.spd_ok_at:.0f} s)",
+            "ready": f"waiting for SPD={self.setpoint}±{self.args.spd_tolerance} ({self.polls} TSTAT polls, {now - self.spd_ok_at:.0f} s)",
             "aon": "waiting for OK,AON",
         }
         parts = [f"Last: {self.last}"]
@@ -176,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--step", type=int, default=100)
     parser.add_argument("--ack-timeout-s", type=float, default=30.0, help="resend AOFF/SPD/AON if no OK within this (default 30)")
     parser.add_argument("--poll-s", type=float, default=10.0, help="TSTAT poll interval while waiting for the turbo to reach speed (default 10)")
+    parser.add_argument("--spd-tolerance", type=int, default=5, help="turbo is at speed when |SPD - setpoint| <= this (default 5)")
     parser.add_argument("--log", type=Path, default=Path("turbo_speed_commands.log"))
     parser.add_argument("--dry-run", action="store_true", help="run the schedule without opening the port; replies are simulated")
     parser.add_argument("--exit-when-done", action="store_true", help="quit after the last step instead of waiting for Ctrl-C")
