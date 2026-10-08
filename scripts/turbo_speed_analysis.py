@@ -17,6 +17,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
+from scipy import stats
 
 from egcf_processing.aggregate import (
     DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
@@ -33,6 +34,8 @@ _ACK_RE = re.compile(r"\bOK,SPD(\d{3,4})?\b")
 _AON_RE = re.compile(r"\bOK,AON\b")
 _LEADING_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)")
 _TS_KEYS = {"SPD": "speed_hz", "PWR": "power_w", "ETEMP": "etemp_c", "BTEMP": "btemp_c", "MTEMP": "mtemp_c", "TP": "tp_raw"}
+
+REF_MASS = 40
 
 _LEG_COLORS = {"down": "#2a78d6", "up": "#eb6834"}
 _TEXT_SECONDARY = "#52514e"
@@ -254,18 +257,127 @@ def _stats(col: str, prefix: str) -> list[pl.Expr]:
 
 
 def mass_stats(rga_tagged: pl.DataFrame, keys: list[str]) -> pl.DataFrame:
-    kept = rga_tagged.filter(~pl.col("in_settle"))
+    """Per-mass mean/std, plus RSD two ways.
+
+    rsd_pct uses the std over the hold, so slow drift counts as noise. rsd_diff_pct uses
+    the std of successive differences within a segment / sqrt(2), which estimates the
+    reading-to-reading (white) noise and is insensitive to drift.
+    """
+    kept = rga_tagged.filter(~pl.col("in_settle")).with_columns(
+        pl.col("current").diff().over(["segment", "mass"]).alias("current_diff")
+    )
     return (
         kept.group_by([*keys, "mass"])
         .agg(
             pl.len().alias("n"),
             *_stats("current", "current_raw"),
+            (pl.col("current_diff").std() / math.sqrt(2)).alias("current_raw_noise"),
             *_stats("amps", "amps"),
             *_stats("torr", "torr"),
         )
-        .with_columns((100 * pl.col("current_raw_std") / pl.col("current_raw_mean")).alias("rsd_pct"))
+        .with_columns(
+            (100 * pl.col("current_raw_std") / pl.col("current_raw_mean")).alias("rsd_pct"),
+            (100 * pl.col("current_raw_noise") / pl.col("current_raw_mean")).alias("rsd_diff_pct"),
+        )
         .sort([*keys, "mass"])
     )
+
+
+def add_ratio(rga_tagged: pl.DataFrame, ref_mass: int) -> pl.DataFrame:
+    """Add scan_id and ratio = current / the ref_mass current from the same scan.
+
+    Scans are split where a mass repeats, as in rga_scans.rga_scan_windows. ratio is
+    null where the scan has no ref_mass reading or it is zero.
+    """
+    seen: set[int] = set()
+    scan_ids, scan_id = [], 0
+    for mass in rga_tagged["mass"]:
+        if mass in seen:
+            scan_id += 1
+            seen = set()
+        seen.add(mass)
+        scan_ids.append(scan_id)
+    r = rga_tagged.with_columns(pl.Series("scan_id", scan_ids, dtype=pl.Int64))
+    ref = r.filter(pl.col("mass") == ref_mass).select("scan_id", pl.col("current").alias("_ref"))
+    return (
+        r.join(ref, on="scan_id", how="left", maintain_order="left")
+        .with_columns(pl.when(pl.col("_ref") != 0).then(pl.col("current") / pl.col("_ref")).alias("ratio"))
+        .drop("_ref")
+    )
+
+
+def ratio_stats(rga_tagged: pl.DataFrame, keys: list[str], ref_mass: int) -> pl.DataFrame:
+    """Per-mass mean/std of the ratio to ref_mass, with rsd_pct and rsd_diff_pct as in mass_stats."""
+    kept = rga_tagged.filter(
+        ~pl.col("in_settle") & (pl.col("mass") != ref_mass) & pl.col("ratio").is_not_null()
+    ).with_columns(pl.col("ratio").diff().over(["segment", "mass"]).alias("ratio_diff"))
+    return (
+        kept.group_by([*keys, "mass"])
+        .agg(
+            pl.len().alias("n"),
+            *_stats("ratio", "ratio"),
+            (pl.col("ratio_diff").std() / math.sqrt(2)).alias("ratio_noise"),
+        )
+        .with_columns(
+            (100 * pl.col("ratio_std") / pl.col("ratio_mean")).alias("rsd_pct"),
+            (100 * pl.col("ratio_noise") / pl.col("ratio_mean")).alias("rsd_diff_pct"),
+        )
+        .sort([*keys, "mass"])
+    )
+
+
+RSD_TESTS_SCHEMA = {
+    "mass": pl.Int64,
+    "test": pl.Utf8,
+    "n_setpoints": pl.Int64,
+    "n": pl.Int64,
+    "statistic": pl.Float64,
+    "p_value": pl.Float64,
+    "p_adj": pl.Float64,
+}
+
+
+def rsd_speed_tests(rga_tagged: pl.DataFrame, mass_by_segment: pl.DataFrame, col: str = "current") -> pl.DataFrame:
+    """Test whether turbo setpoint affects drift-robust RSD of col ("current" or "ratio").
+
+    Per mass: Brown-Forsythe test for equal spread of the relative successive differences
+    (diff / hold mean) across setpoints. Only non-overlapping pairs (x1-x0, x3-x2, ...)
+    are used, since overlapping differences are correlated. p_adj is Benjamini-Hochberg
+    across masses. Overall (mass null): Friedman test with masses as blocks on each
+    setpoint's geometric-mean rsd_diff_pct (Wilcoxon signed-rank if only two setpoints).
+    """
+    kept = rga_tagged.filter(~pl.col("in_settle") & pl.col(col).is_not_null()).with_columns(
+        (pl.col(col).diff() / pl.col(col).mean()).over(["segment", "mass"]).alias("rel_diff"),
+        pl.int_range(pl.len()).over(["segment", "mass"]).alias("i"),
+    )
+    pairs = kept.filter((pl.col("i") % 2 == 1) & pl.col("rel_diff").is_finite())
+    rows = []
+    for (mass,), d in pairs.group_by("mass"):
+        groups = [g["rel_diff"].to_numpy() for _, g in d.group_by("setpoint") if g.height >= 3]
+        if len(groups) < 2:
+            continue
+        res = stats.levene(*groups, center="median")
+        rows.append({"mass": mass, "test": "Brown-Forsythe", "n_setpoints": len(groups), "n": sum(map(len, groups)),
+                     "statistic": float(res.statistic), "p_value": float(res.pvalue)})
+    rows.sort(key=lambda r: r["mass"])
+    if rows:
+        for r, adj in zip(rows, stats.false_discovery_control([r["p_value"] for r in rows])):
+            r["p_adj"] = float(adj)
+
+    wide = (
+        mass_by_segment.filter(pl.col("rsd_diff_pct") > 0)
+        .group_by("mass", "setpoint")
+        .agg(pl.col("rsd_diff_pct").log().mean().exp())
+        .pivot(index="mass", on="setpoint", values="rsd_diff_pct")
+        .drop_nulls()
+    )
+    blocks = wide.drop("mass").to_numpy()
+    if blocks.shape[0] >= 2 and blocks.shape[1] >= 2:
+        res = stats.friedmanchisquare(*blocks.T) if blocks.shape[1] >= 3 else stats.wilcoxon(blocks[:, 0], blocks[:, 1])
+        rows.append({"mass": None, "test": "Friedman" if blocks.shape[1] >= 3 else "Wilcoxon",
+                     "n_setpoints": blocks.shape[1], "n": blocks.shape[0],
+                     "statistic": float(res.statistic), "p_value": float(res.pvalue)})
+    return pl.DataFrame(rows, schema=RSD_TESTS_SCHEMA) if rows else pl.DataFrame(schema=RSD_TESTS_SCHEMA)
 
 
 def tp_stats(turbo_tagged: pl.DataFrame, keys: list[str]) -> pl.DataFrame:
@@ -283,6 +395,61 @@ def tp_stats(turbo_tagged: pl.DataFrame, keys: list[str]) -> pl.DataFrame:
         .with_columns((100 * pl.col("tp_raw_std") / pl.col("tp_raw_mean")).alias("tp_rsd_pct"))
         .sort(keys)
     )
+
+
+def analyze(
+    tables: dict[str, pl.DataFrame],
+    changes: pl.DataFrame,
+    ts_rows: list[dict],
+    start: datetime | None,
+    end: datetime | None,
+    settle_s: float,
+    pp_sens: float,
+    tp_sens: float,
+    ref_mass: int = REF_MASS,
+) -> dict[str, pl.DataFrame]:
+    """Window the changes and readings to [start, end], then tag the readings with the
+    setpoint in effect and compute the per-speed and per-segment stats.
+
+    Changes are windowed too, so readings between start and the first change inside
+    the window have no setpoint and are dropped.
+    """
+
+    def window(df: pl.DataFrame) -> pl.DataFrame:
+        if start is not None:
+            df = df.filter(pl.col("ts") >= start)
+        if end is not None:
+            df = df.filter(pl.col("ts") <= end)
+        return df
+
+    changes = add_segments(window(changes).drop("segment", "leg")).select(changes.columns)
+    rga = window(tables["rga"]).with_columns((pl.col("current") * RAW_CURRENT_AMPS_PER_COUNT).alias("amps"))
+    rga = rga.with_columns((pl.col("amps") / pp_sens).alias("torr"))
+    turbo = window(build_turbo(ts_rows, tables["status"])).with_columns(
+        (pl.col("tp_raw") * RAW_CURRENT_AMPS_PER_COUNT).alias("tp_amps")
+    )
+    turbo = turbo.with_columns((pl.col("tp_amps") / tp_sens).alias("tp_torr"))
+
+    rga_tagged = add_ratio(tag(rga, changes, settle_s), ref_mass)
+    turbo_tagged = tag(turbo, changes, settle_s)
+    seg_keys = ["segment", "leg", "setpoint", "change_ts"]
+    mass_by_segment = mass_stats(rga_tagged, seg_keys)
+    ratio_by_segment = ratio_stats(rga_tagged, seg_keys, ref_mass)
+    return {
+        "speed_changes": changes,
+        "rga_tagged": rga_tagged,
+        "turbo_tagged": turbo_tagged,
+        "mass_stats_by_speed": mass_stats(rga_tagged, ["setpoint"]),
+        "mass_stats_by_segment": mass_by_segment,
+        "tp_by_speed": tp_stats(turbo_tagged, ["setpoint"]),
+        "tp_by_segment": tp_stats(turbo_tagged, seg_keys),
+        "rsd_speed_tests": rsd_speed_tests(rga_tagged, mass_by_segment),
+        "ratio_stats_by_speed": ratio_stats(rga_tagged, ["setpoint"], ref_mass),
+        "ratio_stats_by_segment": ratio_by_segment,
+        "ratio_speed_tests": rsd_speed_tests(
+            rga_tagged.filter(pl.col("mass") != ref_mass), ratio_by_segment, col="ratio"
+        ),
+    }
 
 
 def _style(fig: go.Figure, title: str, height: int) -> go.Figure:
@@ -321,13 +488,15 @@ def fig_timeseries(turbo_tagged: pl.DataFrame, changes: pl.DataFrame, settle_s: 
     for ts, acq_on in changes.select("ts", "acq_on_ts").iter_rows():
         settle_end = (acq_on or ts) + timedelta(seconds=settle_s)
         fig.add_vrect(x0=ts, x1=settle_end, fillcolor="#8a8984", opacity=0.15, line_width=0)
-    fig.update_yaxes(title_text="TP (Torr)", type="log", row=1, col=1)
+    fig.update_yaxes(title_text="TP (Torr)", type="log", exponentformat="E", showexponent="all", row=1, col=1)
     fig.update_yaxes(title_text="measured speed (Hz)", row=2, col=1)
     fig.update_yaxes(title_text="setpoint", row=3, col=1)
     return _style(fig, "Total pressure, measured speed and setpoint (shaded: settle period, excluded)", 750)
 
 
-def fig_mass_facets(seg_stats: pl.DataFrame, value: str, error: str | None, y_title: str, log_y: bool) -> go.Figure:
+def fig_mass_facets(
+    seg_stats: pl.DataFrame, value: str, error: str | None, y_title: str, log_y: bool, hover_fmt: str = ".3e"
+) -> go.Figure:
     masses = sorted(seg_stats["mass"].unique().to_list())
     ncols = 4
     nrows = max(1, math.ceil(len(masses) / ncols))
@@ -349,12 +518,12 @@ def fig_mass_facets(seg_stats: pl.DataFrame, value: str, error: str | None, y_ti
                     marker={"size": 8, "color": color, "symbol": "circle" if leg == "down" else "diamond"},
                     name=f"{leg} leg", legendgroup=leg, showlegend=i == 0,
                     customdata=d.select("segment", "n").to_numpy(),
-                    hovertemplate=f"mass {mass}<br>setpoint %{{x}}<br>{y_title} %{{y:.4g}}<br>segment %{{customdata[0]}}, n=%{{customdata[1]}}<extra>{leg}</extra>",
+                    hovertemplate=f"mass {mass}<br>setpoint %{{x}}<br>{y_title} %{{y:{hover_fmt}}}<br>segment %{{customdata[0]}}, n=%{{customdata[1]}}<extra>{leg}</extra>",
                 ),
                 row=row, col=col,
             )
         if log_y:
-            fig.update_yaxes(type="log", row=row, col=col)
+            fig.update_yaxes(type="log", exponentformat="E", showexponent="all", row=row, col=col)
         if col == 1:
             fig.update_yaxes(title_text=y_title, row=row, col=col)
         if row == nrows:
@@ -392,10 +561,119 @@ def fig_tp(seg_tp: pl.DataFrame) -> go.Figure:
             ),
             row=1, col=2,
         )
-    fig.update_yaxes(title_text="TP (Torr)", type="log")
+    fig.update_yaxes(title_text="TP (Torr)", type="log", exponentformat="E", showexponent="all")
     fig.update_xaxes(title_text="setpoint", row=1, col=1)
     fig.update_xaxes(title_text="measured speed (Hz)", row=1, col=2)
     return _style(fig, "Total pressure vs turbo speed (mean ± std, settle excluded)", 480)
+
+
+def _fmt_p(p: float | None) -> str:
+    if p is None or math.isnan(p):
+        return "n/a"
+    return "p<0.001" if p < 0.001 else f"p={p:.3f}"
+
+
+def fig_rsd(seg_stats: pl.DataFrame, tests: pl.DataFrame, label: str = "Drift-robust RSD") -> go.Figure:
+    """Drift-robust RSD per mass and hold on a log colour scale, the geometric mean across
+    masses as a summary row, and the speed-effect p-values from rsd_speed_tests."""
+    rsd = (
+        seg_stats.filter(pl.col("rsd_diff_pct") > 0)
+        .group_by("mass", "setpoint", "leg")
+        .agg(pl.col("rsd_diff_pct").mean(), pl.col("rsd_pct").mean())
+    )
+    cols = rsd.select("setpoint", "leg").unique().sort(["setpoint", pl.col("leg") == "up"])
+    col_labels = [f"{sp} {'↓' if leg == 'down' else '↑'}" for sp, leg in cols.iter_rows()]
+    masses = sorted(rsd["mass"].unique().to_list())
+    grid = cols.join(pl.DataFrame({"mass": masses}, schema={"mass": pl.Int64}), how="cross").join(rsd, on=["mass", "setpoint", "leg"], how="left")
+
+    def matrix(col: str) -> list[list]:
+        return [grid.filter(pl.col("mass") == m)[col].to_list() for m in masses]
+
+    summary = cols.join(
+        rsd.group_by("setpoint", "leg").agg(pl.col("rsd_diff_pct").log().mean().exp().alias("geo"), pl.len().alias("n_mass")),
+        on=["setpoint", "leg"], how="left",
+    )
+    p_by_mass = dict(tests.filter(pl.col("mass").is_not_null()).select("mass", "p_adj").iter_rows())
+    overall = tests.filter(pl.col("mass").is_null())
+    overall_label = f"{overall['test'][0]} {_fmt_p(overall['p_value'][0])}" if overall.height else "n/a"
+
+    def log10(rows: list[list]) -> list[list]:
+        return [[math.log10(v) if v else None for v in r] for r in rows]
+
+    def cell_text(rows: list[list]) -> list[list]:
+        return [[f"{v:.2f}" if v else "" for v in r] for r in rows]
+
+    all_vals = [v for r in [summary["geo"].to_list(), *matrix("rsd_diff_pct")] for v in r if v]
+    lo, hi = (math.floor(math.log10(min(all_vals))), math.ceil(math.log10(max(all_vals)))) if all_vals else (-1, 1)
+    hi = max(hi, lo + 1)
+    ticks = [t / 2 for t in range(2 * lo, 2 * hi + 1)]
+    x = list(range(len(col_labels)))
+    common = {"x": x, "zmin": lo, "zmax": hi, "colorscale": "Blues", "reversescale": True, "texttemplate": "%{text}"}
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.12, 0.88], vertical_spacing=0.03)
+    fig.add_trace(
+        go.Heatmap(
+            z=log10([summary["geo"].to_list()]), y=[f"all masses ({overall_label})"],
+            customdata=[[[c, g, n] for c, g, n in zip(col_labels, summary["geo"].to_list(), summary["n_mass"].to_list())]],
+            text=cell_text([summary["geo"].to_list()]), showscale=False,
+            hovertemplate="%{customdata[0]}<br>geometric mean RSD %{customdata[1]:.3g}% over %{customdata[2]} masses<extra></extra>",
+            **common,
+        ),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Heatmap(
+            z=log10(matrix("rsd_diff_pct")),
+            y=[f"m{m} ({_fmt_p(p_by_mass.get(m))})" for m in masses],
+            customdata=[[[c, a, b] for c, a, b in zip(col_labels, r1, r2)] for r1, r2 in zip(matrix("rsd_diff_pct"), matrix("rsd_pct"))],
+            text=cell_text(matrix("rsd_diff_pct")),
+            hovertemplate="%{y} %{customdata[0]}<br>RSD (drift-robust) %{customdata[1]:.3g}%"
+            "<br>RSD (incl. drift) %{customdata[2]:.3g}%<extra></extra>",
+            colorbar={"title": "RSD (%)", "len": 0.85, "y": 0.43, "tickvals": ticks,
+                      "ticktext": [f"{10 ** t:.2g}" for t in ticks]},
+            **common,
+        ),
+        row=2, col=1,
+    )
+    if summary["geo"].is_not_null().any():
+        best = summary["geo"].arg_min()
+        fig.add_shape(
+            type="rect", x0=best - 0.5, x1=best + 0.5, y0=-0.5, y1=0.5, xref="x", yref="y",
+            line={"color": "#eb6834", "width": 3},
+        )
+    fig.update_xaxes(tickvals=x, ticktext=col_labels, row=2, col=1)
+    fig.update_xaxes(title_text="setpoint (↓ down leg, ↑ up leg)", row=2, col=1)
+    fig.update_yaxes(autorange="reversed", row=2, col=1)
+    fig = _style(
+        fig,
+        f"{label} (%) by mass and speed (outlined: lowest overall). "
+        "Per-mass p: Brown-Forsythe across setpoints, BH-adjusted",
+        28 * len(masses) + 260,
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=False)
+    return fig
+
+
+def build_figs(outputs: dict[str, pl.DataFrame], settle_s: float) -> list[go.Figure]:
+    seg_stats = outputs["mass_stats_by_segment"]
+    return [
+        fig_timeseries(outputs["turbo_tagged"], outputs["speed_changes"], settle_s),
+        fig_mass_facets(seg_stats, "torr_mean", "torr_std", "partial pressure (Torr)", log_y=True),
+        fig_mass_facets(seg_stats, "rsd_pct", None, "RSD (%)", log_y=False, hover_fmt=".3g"),
+        fig_rsd(seg_stats, outputs["rsd_speed_tests"]),
+        fig_tp(outputs["tp_by_segment"]),
+    ]
+
+
+def build_ratio_figs(outputs: dict[str, pl.DataFrame], ref_mass: int = REF_MASS) -> list[go.Figure]:
+    seg = outputs["ratio_stats_by_segment"]
+    if seg.is_empty():
+        return []
+    return [
+        fig_mass_facets(seg, "ratio_mean", "ratio_std", f"signal / m{ref_mass}", log_y=True, hover_fmt=".4g"),
+        fig_mass_facets(seg, "rsd_pct", None, f"RSD of signal / m{ref_mass} (%)", log_y=False, hover_fmt=".3g"),
+        fig_rsd(seg, outputs["ratio_speed_tests"], label=f"Drift-robust RSD of signal / m{ref_mass}"),
+    ]
 
 
 def write_report(figs: list[go.Figure], path: Path) -> None:
@@ -419,10 +697,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("raw_dir", type=Path)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--settle-min", type=float, default=10.0, help="minutes dropped after acquisition restarts (OK,AON) following each speed change (default 10)")
-    parser.add_argument("--start", type=_parse_iso, help="ignore readings before this ISO time (UTC)")
+    parser.add_argument("--start", type=_parse_iso, help="ignore readings and changes before this ISO time (UTC)")
     parser.add_argument("--end", type=_parse_iso, help="ignore readings and changes after this ISO time (UTC)")
     parser.add_argument("--commands-log", type=Path, help="turbo_speed_commands.log from the stepper, as an extra event source")
     parser.add_argument("--ack-window-s", type=float, default=120.0, help="max command-to-ack gap, and dedup window (default 120)")
+    parser.add_argument("--ref-mass", type=int, default=REF_MASS, help=f"mass each signal is normalised to (default {REF_MASS})")
     parser.add_argument("--format", choices=["parquet", "csv"], default="parquet")
     parser.add_argument("--partial-pressure-sensitivity", type=float, default=DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR, help="A/Torr")
     parser.add_argument("--total-pressure-sensitivity", type=float, default=DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR, help="A/Torr")
@@ -431,55 +710,22 @@ def main(argv: list[str] | None = None) -> int:
 
     tables = build_tables(read_all(find_all_files(args.raw_dir)))
     commands, acks, aon_acks, ts_rows = scan_raw(args.raw_dir, args.commands_log)
-    changes = build_speed_changes(commands, acks, args.ack_window_s)
-    if args.end is not None:
-        changes = add_segments(changes.filter(pl.col("ts") <= args.end).drop("segment", "leg"))
-    changes = add_acq_on(changes, aon_acks)
+    changes = add_acq_on(build_speed_changes(commands, acks, args.ack_window_s), aon_acks)
+    outputs = analyze(
+        tables, changes, ts_rows, args.start, args.end, settle_s,
+        args.partial_pressure_sensitivity, args.total_pressure_sensitivity, args.ref_mass,
+    )
+    changes = outputs["speed_changes"]
     print(f"found {len(commands)} SPD command sightings, {len(acks)} OK,SPD acks -> {changes.height} speed changes")
     if changes.is_empty():
         print("No speed changes found; nothing to analyse.", file=sys.stderr)
         return 1
 
-    def window(df: pl.DataFrame) -> pl.DataFrame:
-        if args.start is not None:
-            df = df.filter(pl.col("ts") >= args.start)
-        if args.end is not None:
-            df = df.filter(pl.col("ts") <= args.end)
-        return df
-
-    rga = window(tables["rga"]).with_columns((pl.col("current") * RAW_CURRENT_AMPS_PER_COUNT).alias("amps"))
-    rga = rga.with_columns((pl.col("amps") / args.partial_pressure_sensitivity).alias("torr"))
-    turbo = window(build_turbo(ts_rows, tables["status"])).with_columns(
-        (pl.col("tp_raw") * RAW_CURRENT_AMPS_PER_COUNT).alias("tp_amps")
-    )
-    turbo = turbo.with_columns((pl.col("tp_amps") / args.total_pressure_sensitivity).alias("tp_torr"))
-
-    rga_tagged = tag(rga, changes, settle_s)
-    turbo_tagged = tag(turbo, changes, settle_s)
-    seg_keys = ["segment", "leg", "setpoint", "change_ts"]
-    outputs = {
-        "speed_changes": changes,
-        "rga_tagged": rga_tagged,
-        "turbo_tagged": turbo_tagged,
-        "mass_stats_by_speed": mass_stats(rga_tagged, ["setpoint"]),
-        "mass_stats_by_segment": mass_stats(rga_tagged, seg_keys),
-        "tp_by_speed": tp_stats(turbo_tagged, ["setpoint"]),
-        "tp_by_segment": tp_stats(turbo_tagged, seg_keys),
-    }
     for name, df in outputs.items():
         write_df(df, args.out_dir, name, args.format)
 
-    seg_stats = outputs["mass_stats_by_segment"]
     report = args.out_dir / "turbo_speed_report.html"
-    write_report(
-        [
-            fig_timeseries(turbo_tagged, changes, settle_s),
-            fig_mass_facets(seg_stats, "torr_mean", "torr_std", "partial pressure (Torr)", log_y=True),
-            fig_mass_facets(seg_stats, "rsd_pct", None, "RSD (%)", log_y=False),
-            fig_tp(outputs["tp_by_segment"]),
-        ],
-        report,
-    )
+    write_report([*build_figs(outputs, settle_s), *build_ratio_figs(outputs, args.ref_mass)], report)
 
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200, fmt_float="mixed"):
         print(changes)
@@ -489,6 +735,9 @@ def main(argv: list[str] | None = None) -> int:
             .pivot(index="setpoint", on="mass", values="rsd_pct")
             .rename(lambda c: c if c == "setpoint" else f"rsd_m{c}")
         )
+        print(outputs["rsd_speed_tests"])
+        print(f"signal / m{args.ref_mass}:")
+        print(outputs["ratio_speed_tests"])
     print(f"wrote outputs and {report} to {args.out_dir}")
     return 0
 

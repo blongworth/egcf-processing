@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "marimo>=0.25.1",
     "plotly>=7.0.0",
     "polars>=1.9",
     "scipy>=1.15.3",
@@ -29,3 +30,6 @@ packages = ["src/egcf_processing"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.marimo.display]
+locale = "en-GB"
