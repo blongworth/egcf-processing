@@ -134,11 +134,12 @@ def _(all_changes, end_picker, mo, settle_min, start_picker, tables, ts_rows, ts
     )
     figs = tsa.build_figs(outputs, settle_s)
     ratio_figs = tsa.build_ratio_figs(outputs)
-    return figs, outputs, ratio_figs, settle_s
+    noise_fig = tsa.fig_noise_vs_signal(outputs["mass_stats_by_segment"])
+    return figs, noise_fig, outputs, ratio_figs, settle_s
 
 
 @app.cell
-def _(figs, mo, outputs, pl, ratio_figs, tsa):
+def _(figs, mo, noise_fig, outputs, pl, ratio_figs, tsa):
     def _fmt(df):
         mapping = {}
         for col, dtype in df.schema.items():
@@ -146,7 +147,7 @@ def _(figs, mo, outputs, pl, ratio_figs, tsa):
                 continue
             if "torr" in col or "amps" in col:
                 mapping[col] = "{:.3e}"
-            elif "rsd" in col or "speed" in col or col == "statistic":
+            elif "rsd" in col or "speed" in col or col == "statistic" or col.endswith("_lo_hi"):
                 mapping[col] = "{:.2f}"
             elif col.startswith("p_"):
                 mapping[col] = "{:.3g}"
@@ -177,6 +178,21 @@ def _(figs, mo, outputs, pl, ratio_figs, tsa):
         {
             "Plots": mo.vstack(figs),
             f"Normalised to m{tsa.REF_MASS}": _ratio_tab,
+            "Noise vs signal": mo.vstack(
+                [
+                    noise_fig,
+                    mo.md(
+                        "If the speed effect works only through signal level, every point lies on the one model "
+                        "curve whatever its colour; points at one setpoint sitting consistently off the curve "
+                        "indicate a direct speed effect. In the table, `*_lo_hi` is the value at the lowest "
+                        "setpoint over the highest. A **noise-floor-limited** mass shows `signal_lo_hi` > 1, "
+                        "`noise_lo_hi` ≈ 1 (absolute-noise `p_adj_noise` not significant) and "
+                        "`rsd_lo_hi` ≈ 1 / `signal_lo_hi`. A mass limited by **noise proportional to signal** "
+                        "shows `noise_lo_hi` ≈ `signal_lo_hi` and `rsd_lo_hi` ≈ 1."
+                    ),
+                    _table(outputs["noise_floor_summary"], "noise floor check, per mass"),
+                ]
+            ),
             "Tables": mo.vstack(
                 [
                     _table(outputs["speed_changes"], "speed changes"),
@@ -208,13 +224,13 @@ def _(cli, mo):
 
 
 @app.cell
-def _(Path, cli, export_btn, figs, is_script, mo, out_dir, out_format, outputs, ratio_figs, tsa, write_df):
+def _(Path, cli, export_btn, figs, is_script, mo, noise_fig, out_dir, out_format, outputs, ratio_figs, tsa, write_df):
     mo.stop(not (export_btn.value or (is_script and cli.get("out-dir"))))
     _dir = Path(out_dir.value)
     for _name, _df in outputs.items():
         write_df(_df, _dir, _name, out_format.value)
     _report = _dir / "turbo_speed_report.html"
-    tsa.write_report([*figs, *ratio_figs], _report)
+    tsa.write_report([*figs, noise_fig, *ratio_figs], _report)
     mo.md(f"Wrote {len(outputs)} tables and `{_report}`")
     return
 

@@ -15,9 +15,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import plotly.graph_objects as go
+import numpy as np
 import polars as pl
 from plotly.subplots import make_subplots
-from scipy import stats
+from scipy import optimize, stats
 
 from egcf_processing.aggregate import (
     DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
@@ -337,17 +338,17 @@ RSD_TESTS_SCHEMA = {
 }
 
 
-def rsd_speed_tests(rga_tagged: pl.DataFrame, mass_by_segment: pl.DataFrame, col: str = "current") -> pl.DataFrame:
-    """Test whether turbo setpoint affects drift-robust RSD of col ("current" or "ratio").
+def rsd_speed_tests(rga_tagged: pl.DataFrame, col: str = "current", relative: bool = True) -> pl.DataFrame:
+    """Test whether turbo setpoint affects drift-robust RSD of col ("current" or "ratio"),
+    or with relative=False, the absolute noise.
 
-    Per mass: Brown-Forsythe test for equal spread of the relative successive differences
-    (diff / hold mean) across setpoints. Only non-overlapping pairs (x1-x0, x3-x2, ...)
+    Per mass: Brown-Forsythe test for equal spread of the successive differences across
+    setpoints, divided by the hold mean when relative. Only non-overlapping pairs (x1-x0, x3-x2, ...)
     are used, since overlapping differences are correlated. p_adj is Benjamini-Hochberg
-    across masses. Overall (mass null): Friedman test with masses as blocks on each
-    setpoint's geometric-mean rsd_diff_pct (Wilcoxon signed-rank if only two setpoints).
+    across masses.
     """
     kept = rga_tagged.filter(~pl.col("in_settle") & pl.col(col).is_not_null()).with_columns(
-        (pl.col(col).diff() / pl.col(col).mean()).over(["segment", "mass"]).alias("rel_diff"),
+        (pl.col(col).diff() / (pl.col(col).mean() if relative else 1)).over(["segment", "mass"]).alias("rel_diff"),
         pl.int_range(pl.len()).over(["segment", "mass"]).alias("i"),
     )
     pairs = kept.filter((pl.col("i") % 2 == 1) & pl.col("rel_diff").is_finite())
@@ -363,21 +364,59 @@ def rsd_speed_tests(rga_tagged: pl.DataFrame, mass_by_segment: pl.DataFrame, col
     if rows:
         for r, adj in zip(rows, stats.false_discovery_control([r["p_value"] for r in rows])):
             r["p_adj"] = float(adj)
-
-    wide = (
-        mass_by_segment.filter(pl.col("rsd_diff_pct") > 0)
-        .group_by("mass", "setpoint")
-        .agg(pl.col("rsd_diff_pct").log().mean().exp())
-        .pivot(index="mass", on="setpoint", values="rsd_diff_pct")
-        .drop_nulls()
-    )
-    blocks = wide.drop("mass").to_numpy()
-    if blocks.shape[0] >= 2 and blocks.shape[1] >= 2:
-        res = stats.friedmanchisquare(*blocks.T) if blocks.shape[1] >= 3 else stats.wilcoxon(blocks[:, 0], blocks[:, 1])
-        rows.append({"mass": None, "test": "Friedman" if blocks.shape[1] >= 3 else "Wilcoxon",
-                     "n_setpoints": blocks.shape[1], "n": blocks.shape[0],
-                     "statistic": float(res.statistic), "p_value": float(res.pvalue)})
     return pl.DataFrame(rows, schema=RSD_TESTS_SCHEMA) if rows else pl.DataFrame(schema=RSD_TESTS_SCHEMA)
+
+
+def noise_floor_summary(
+    mass_by_speed: pl.DataFrame, rsd_tests: pl.DataFrame, noise_tests: pl.DataFrame
+) -> pl.DataFrame:
+    """Per mass, signal, drift-robust noise and RSD at the lowest setpoint relative to the
+    highest, with the speed-effect p-values for RSD and absolute noise.
+
+    A noise-floor-limited mass shows signal_lo_hi > 1, noise_lo_hi ~ 1 and
+    rsd_lo_hi ~ 1 / signal_lo_hi; a mass limited by noise proportional to signal shows
+    noise_lo_hi ~ signal_lo_hi and rsd_lo_hi ~ 1.
+    """
+    d = mass_by_speed.filter(pl.col("current_raw_noise") > 0)
+    if d.is_empty():
+        return pl.DataFrame(
+            schema={"mass": pl.Int64, "setpoint_lo": pl.Int64, "setpoint_hi": pl.Int64, "signal_lo_hi": pl.Float64,
+                    "noise_lo_hi": pl.Float64, "rsd_lo_hi": pl.Float64, "p_adj_rsd": pl.Float64, "p_adj_noise": pl.Float64}
+        )
+    lo, hi = d["setpoint"].min(), d["setpoint"].max()
+    at = lambda sp: d.filter(pl.col("setpoint") == sp).select("mass", "current_raw_mean", "current_raw_noise", "rsd_diff_pct")
+    return (
+        at(lo).join(at(hi), on="mass", suffix="_hi")
+        .select(
+            "mass",
+            pl.lit(lo, dtype=pl.Int64).alias("setpoint_lo"),
+            pl.lit(hi, dtype=pl.Int64).alias("setpoint_hi"),
+            (pl.col("current_raw_mean") / pl.col("current_raw_mean_hi")).alias("signal_lo_hi"),
+            (pl.col("current_raw_noise") / pl.col("current_raw_noise_hi")).alias("noise_lo_hi"),
+            (pl.col("rsd_diff_pct") / pl.col("rsd_diff_pct_hi")).alias("rsd_lo_hi"),
+        )
+        .join(rsd_tests.select("mass", pl.col("p_adj").alias("p_adj_rsd")), on="mass", how="left")
+        .join(noise_tests.select("mass", pl.col("p_adj").alias("p_adj_noise")), on="mass", how="left")
+        .sort("mass")
+    )
+
+
+def fit_noise_model(seg_stats: pl.DataFrame) -> dict[str, float] | None:
+    """Fit noise^2 = floor^2 + shot * S + (prop * S)^2 (raw counts) to every mass and hold,
+    in log space so small and large signals weigh equally. None if under 3 holds."""
+    d = seg_stats.filter((pl.col("current_raw_noise") > 0) & (pl.col("current_raw_mean") > 0))
+    if d.height < 3:
+        return None
+    sig = d["current_raw_mean"].to_numpy()
+    noise = d["current_raw_noise"].to_numpy()
+
+    def resid(p):
+        return np.log(noise) - 0.5 * np.log(p[0] ** 2 + p[1] * sig + (p[2] * sig) ** 2)
+
+    x0 = [noise.min(), noise.min() ** 2 / np.median(sig), np.median(noise / sig)]
+    fit = optimize.least_squares(resid, x0, bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), x_scale="jac")
+    floor, shot, prop = fit.x
+    return {"floor": float(floor), "shot": float(shot), "prop": float(prop)}
 
 
 def tp_stats(turbo_tagged: pl.DataFrame, keys: list[str]) -> pl.DataFrame:
@@ -433,21 +472,24 @@ def analyze(
     rga_tagged = add_ratio(tag(rga, changes, settle_s), ref_mass)
     turbo_tagged = tag(turbo, changes, settle_s)
     seg_keys = ["segment", "leg", "setpoint", "change_ts"]
-    mass_by_segment = mass_stats(rga_tagged, seg_keys)
-    ratio_by_segment = ratio_stats(rga_tagged, seg_keys, ref_mass)
+    mass_by_speed = mass_stats(rga_tagged, ["setpoint"])
+    rsd_tests = rsd_speed_tests(rga_tagged)
+    noise_tests = rsd_speed_tests(rga_tagged, relative=False)
     return {
         "speed_changes": changes,
         "rga_tagged": rga_tagged,
         "turbo_tagged": turbo_tagged,
-        "mass_stats_by_speed": mass_stats(rga_tagged, ["setpoint"]),
-        "mass_stats_by_segment": mass_by_segment,
+        "mass_stats_by_speed": mass_by_speed,
+        "mass_stats_by_segment": mass_stats(rga_tagged, seg_keys),
         "tp_by_speed": tp_stats(turbo_tagged, ["setpoint"]),
         "tp_by_segment": tp_stats(turbo_tagged, seg_keys),
-        "rsd_speed_tests": rsd_speed_tests(rga_tagged, mass_by_segment),
+        "rsd_speed_tests": rsd_tests,
+        "noise_speed_tests": noise_tests,
+        "noise_floor_summary": noise_floor_summary(mass_by_speed, rsd_tests, noise_tests),
         "ratio_stats_by_speed": ratio_stats(rga_tagged, ["setpoint"], ref_mass),
-        "ratio_stats_by_segment": ratio_by_segment,
+        "ratio_stats_by_segment": ratio_stats(rga_tagged, seg_keys, ref_mass),
         "ratio_speed_tests": rsd_speed_tests(
-            rga_tagged.filter(pl.col("mass") != ref_mass), ratio_by_segment, col="ratio"
+            rga_tagged.filter(pl.col("mass") != ref_mass), col="ratio"
         ),
     }
 
@@ -532,39 +574,26 @@ def fig_mass_facets(
 
 
 def fig_tp(seg_tp: pl.DataFrame) -> go.Figure:
-    fig = make_subplots(rows=1, cols=2, subplot_titles=["TP vs setpoint", "TP vs measured speed"], horizontal_spacing=0.08)
+    fig = go.Figure()
     for leg, color in _LEG_COLORS.items():
         d = seg_tp.filter(pl.col("leg") == leg).sort("setpoint")
         if d.is_empty():
             continue
-        common = {
-            "y": d["tp_torr_mean"],
-            "error_y": {"type": "data", "array": d["tp_torr_std"].to_list(), "thickness": 1},
-            "marker": {"size": 8, "color": color, "symbol": "circle" if leg == "down" else "diamond"},
-            "legendgroup": leg,
-            "customdata": d.select("segment", "n").to_numpy(),
-        }
         fig.add_trace(
             go.Scatter(
-                x=d["setpoint"], mode="lines+markers", line={"width": 2, "color": color, "dash": "solid" if leg == "down" else "dash"},
-                name=f"{leg} leg", hovertemplate="setpoint %{x}<br>TP %{y:.3e} Torr<br>segment %{customdata[0]}, n=%{customdata[1]}<extra></extra>",
-                **common,
-            ),
-            row=1, col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=d["speed_hz_mean"], error_x={"type": "data", "array": d["speed_hz_std"].to_list(), "thickness": 1},
-                mode="markers", showlegend=False,
-                hovertemplate="speed %{x:.0f} Hz<br>TP %{y:.3e} Torr<br>segment %{customdata[0]}, n=%{customdata[1]}<extra></extra>",
-                **common,
-            ),
-            row=1, col=2,
+                x=d["speed_hz_mean"], y=d["tp_torr_mean"],
+                error_x={"type": "data", "array": d["speed_hz_std"].to_list(), "thickness": 1},
+                error_y={"type": "data", "array": d["tp_torr_std"].to_list(), "thickness": 1},
+                mode="lines+markers", line={"width": 2, "color": color, "dash": "solid" if leg == "down" else "dash"},
+                marker={"size": 8, "color": color, "symbol": "circle" if leg == "down" else "diamond"},
+                name=f"{leg} leg", customdata=d.select("segment", "n", "setpoint").to_numpy(),
+                hovertemplate="speed %{x:.0f} Hz (setpoint %{customdata[2]})<br>TP %{y:.3e} Torr"
+                "<br>segment %{customdata[0]}, n=%{customdata[1]}<extra></extra>",
+            )
         )
     fig.update_yaxes(title_text="TP (Torr)", type="log", exponentformat="E", showexponent="all")
-    fig.update_xaxes(title_text="setpoint", row=1, col=1)
-    fig.update_xaxes(title_text="measured speed (Hz)", row=1, col=2)
-    return _style(fig, "Total pressure vs turbo speed (mean ± std, settle excluded)", 480)
+    fig.update_xaxes(title_text="measured speed (Hz)")
+    return _style(fig, "Total pressure vs measured turbo speed (mean ± std, settle excluded)", 480)
 
 
 def _fmt_p(p: float | None) -> str:
@@ -574,8 +603,8 @@ def _fmt_p(p: float | None) -> str:
 
 
 def fig_rsd(seg_stats: pl.DataFrame, tests: pl.DataFrame, label: str = "Drift-robust RSD") -> go.Figure:
-    """Drift-robust RSD per mass and hold on a log colour scale, the geometric mean across
-    masses as a summary row, and the speed-effect p-values from rsd_speed_tests."""
+    """Drift-robust RSD per mass and hold on a log colour scale, with the per-mass
+    speed-effect p-values from rsd_speed_tests."""
     rsd = (
         seg_stats.filter(pl.col("rsd_diff_pct") > 0)
         .group_by("mass", "setpoint", "leg")
@@ -585,73 +614,102 @@ def fig_rsd(seg_stats: pl.DataFrame, tests: pl.DataFrame, label: str = "Drift-ro
     col_labels = [f"{sp} {'↓' if leg == 'down' else '↑'}" for sp, leg in cols.iter_rows()]
     masses = sorted(rsd["mass"].unique().to_list())
     grid = cols.join(pl.DataFrame({"mass": masses}, schema={"mass": pl.Int64}), how="cross").join(rsd, on=["mass", "setpoint", "leg"], how="left")
+    rsd_diff = [grid.filter(pl.col("mass") == m)["rsd_diff_pct"].to_list() for m in masses]
+    rsd_plain = [grid.filter(pl.col("mass") == m)["rsd_pct"].to_list() for m in masses]
 
-    def matrix(col: str) -> list[list]:
-        return [grid.filter(pl.col("mass") == m)[col].to_list() for m in masses]
+    p_by_mass = dict(tests.select("mass", "p_adj").iter_rows())
 
-    summary = cols.join(
-        rsd.group_by("setpoint", "leg").agg(pl.col("rsd_diff_pct").log().mean().exp().alias("geo"), pl.len().alias("n_mass")),
-        on=["setpoint", "leg"], how="left",
-    )
-    p_by_mass = dict(tests.filter(pl.col("mass").is_not_null()).select("mass", "p_adj").iter_rows())
-    overall = tests.filter(pl.col("mass").is_null())
-    overall_label = f"{overall['test'][0]} {_fmt_p(overall['p_value'][0])}" if overall.height else "n/a"
-
-    def log10(rows: list[list]) -> list[list]:
-        return [[math.log10(v) if v else None for v in r] for r in rows]
-
-    def cell_text(rows: list[list]) -> list[list]:
-        return [[f"{v:.2f}" if v else "" for v in r] for r in rows]
-
-    all_vals = [v for r in [summary["geo"].to_list(), *matrix("rsd_diff_pct")] for v in r if v]
+    all_vals = [v for r in rsd_diff for v in r if v]
     lo, hi = (math.floor(math.log10(min(all_vals))), math.ceil(math.log10(max(all_vals)))) if all_vals else (-1, 1)
     hi = max(hi, lo + 1)
     ticks = [t / 2 for t in range(2 * lo, 2 * hi + 1)]
     x = list(range(len(col_labels)))
-    common = {"x": x, "zmin": lo, "zmax": hi, "colorscale": "Blues", "reversescale": True, "texttemplate": "%{text}"}
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.12, 0.88], vertical_spacing=0.03)
-    fig.add_trace(
+    y = list(range(len(masses)))
+    fig = go.Figure(
         go.Heatmap(
-            z=log10([summary["geo"].to_list()]), y=[f"all masses ({overall_label})"],
-            customdata=[[[c, g, n] for c, g, n in zip(col_labels, summary["geo"].to_list(), summary["n_mass"].to_list())]],
-            text=cell_text([summary["geo"].to_list()]), showscale=False,
-            hovertemplate="%{customdata[0]}<br>geometric mean RSD %{customdata[1]:.3g}% over %{customdata[2]} masses<extra></extra>",
-            **common,
-        ),
-        row=1, col=1,
-    )
-    fig.add_trace(
-        go.Heatmap(
-            z=log10(matrix("rsd_diff_pct")),
-            y=[f"m{m} ({_fmt_p(p_by_mass.get(m))})" for m in masses],
-            customdata=[[[c, a, b] for c, a, b in zip(col_labels, r1, r2)] for r1, r2 in zip(matrix("rsd_diff_pct"), matrix("rsd_pct"))],
-            text=cell_text(matrix("rsd_diff_pct")),
-            hovertemplate="%{y} %{customdata[0]}<br>RSD (drift-robust) %{customdata[1]:.3g}%"
-            "<br>RSD (incl. drift) %{customdata[2]:.3g}%<extra></extra>",
-            colorbar={"title": "RSD (%)", "len": 0.85, "y": 0.43, "tickvals": ticks,
-                      "ticktext": [f"{10 ** t:.2g}" for t in ticks]},
-            **common,
-        ),
-        row=2, col=1,
-    )
-    if summary["geo"].is_not_null().any():
-        best = summary["geo"].arg_min()
-        fig.add_shape(
-            type="rect", x0=best - 0.5, x1=best + 0.5, y0=-0.5, y1=0.5, xref="x", yref="y",
-            line={"color": "#eb6834", "width": 3},
+            x=x, y=y, zmin=lo, zmax=hi, colorscale="Blues", reversescale=True,
+            z=[[math.log10(v) if v else None for v in r] for r in rsd_diff],
+            text=[[f"{v:.2f}" if v else "" for v in r] for r in rsd_diff], texttemplate="%{text}",
+            customdata=[
+                [[f"m{m}", c, a, b] for c, a, b in zip(col_labels, r1, r2)] for m, r1, r2 in zip(masses, rsd_diff, rsd_plain)
+            ],
+            hovertemplate="%{customdata[0]} %{customdata[1]}<br>RSD (drift-robust) %{customdata[2]:.3g}%"
+            "<br>RSD (incl. drift) %{customdata[3]:.3g}%<extra></extra>",
+            colorbar={"title": "RSD (%)", "tickvals": ticks, "ticktext": [f"{10 ** t:.2g}" for t in ticks]},
         )
-    fig.update_xaxes(tickvals=x, ticktext=col_labels, row=2, col=1)
-    fig.update_xaxes(title_text="setpoint (↓ down leg, ↑ up leg)", row=2, col=1)
-    fig.update_yaxes(autorange="reversed", row=2, col=1)
+    )
+    fig.update_xaxes(tickvals=x, ticktext=col_labels, title_text="setpoint (↓ down leg, ↑ up leg)")
+    fig.update_yaxes(tickvals=y, ticktext=[f"m{m} ({_fmt_p(p_by_mass.get(m))})" for m in masses], autorange="reversed")
     fig = _style(
         fig,
-        f"{label} (%) by mass and speed (outlined: lowest overall). "
-        "Per-mass p: Brown-Forsythe across setpoints, BH-adjusted",
-        28 * len(masses) + 260,
+        f"{label} (%) by mass and speed<br><sup>p: Brown-Forsythe across setpoints, BH-adjusted</sup>",
+        28 * len(masses) + 220,
     )
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=False)
     return fig
+
+
+def fig_noise_vs_signal(seg_stats: pl.DataFrame) -> go.Figure:
+    """Drift-robust noise and RSD against mean signal, one point per mass and hold, coloured
+    by setpoint, with the fitted noise model. If the speed effect works only through
+    signal level, every point lies on the one curve whatever its setpoint."""
+    d = seg_stats.filter((pl.col("current_raw_noise") > 0) & (pl.col("current_raw_mean") > 0)).with_columns(
+        (pl.col("current_raw_noise") * RAW_CURRENT_AMPS_PER_COUNT).alias("noise_amps")
+    )
+    fig = make_subplots(rows=1, cols=2, subplot_titles=["noise vs signal", "RSD vs signal"], horizontal_spacing=0.1)
+    panels = [(1, "noise_amps"), (2, "rsd_diff_pct")]
+    for (mass,), m in d.sort("mass").group_by("mass", maintain_order=True):
+        m = m.sort("current_raw_mean")
+        labels = [""] * (m.height - 1) + [f"m{mass}"]
+        for col, y in panels:
+            fig.add_trace(
+                go.Scatter(
+                    x=m["amps_mean"], y=m[y], mode="lines+text", text=labels, textposition="middle right",
+                    line={"color": "#b4b2ac", "width": 1}, showlegend=False, hoverinfo="skip",
+                ),
+                row=1, col=col,
+            )
+    custom = d.select("mass", "setpoint", "leg", "segment", "n", "noise_amps", "rsd_diff_pct").to_numpy()
+    for col, y in panels:
+        fig.add_trace(
+            go.Scatter(
+                x=d["amps_mean"], y=d[y], mode="markers", customdata=custom, showlegend=False,
+                marker={
+                    "size": 9, "color": d["setpoint"], "colorscale": "Viridis", "line": {"width": 0.5, "color": "white"},
+                    "symbol": ["circle" if leg == "down" else "diamond" for leg in d["leg"]],
+                    "colorbar": {"title": "setpoint"} if col == 1 else None, "showscale": col == 1,
+                },
+                hovertemplate="m%{customdata[0]} setpoint %{customdata[1]} (%{customdata[2]} leg, segment %{customdata[3]}, n=%{customdata[4]})"
+                "<br>signal %{x:.3e} A<br>noise %{customdata[5]:.3e} A<br>RSD %{customdata[6]:.3g}%<extra></extra>",
+            ),
+            row=1, col=col,
+        )
+    model = fit_noise_model(seg_stats)
+    subtitle = "fit needs 3 or more holds"
+    if model is not None:
+        s = np.geomspace(d["current_raw_mean"].min(), d["current_raw_mean"].max(), 200)
+        sigma = np.sqrt(model["floor"] ** 2 + model["shot"] * s + (model["prop"] * s) ** 2)
+        for col, y in [(1, sigma * RAW_CURRENT_AMPS_PER_COUNT), (2, 100 * sigma / s)]:
+            fig.add_trace(
+                go.Scatter(
+                    x=s * RAW_CURRENT_AMPS_PER_COUNT, y=y, mode="lines", line={"color": "#eb6834", "width": 2, "dash": "dash"},
+                    name="noise model (all masses, all speeds)", legendgroup="model", showlegend=col == 1, hoverinfo="skip",
+                ),
+                row=1, col=col,
+            )
+        subtitle = (
+            f"model: noise² = floor² + shot·S + (prop·S)², floor {model['floor'] * RAW_CURRENT_AMPS_PER_COUNT:.2e} A, "
+            f"prop {100 * model['prop']:.2f}%"
+        )
+    fig.update_xaxes(type="log", exponentformat="E", showexponent="all", title_text="mean signal (A)")
+    fig.update_yaxes(type="log", exponentformat="E", showexponent="all", title_text="drift-robust noise (A)", row=1, col=1)
+    fig.update_yaxes(type="log", title_text="drift-robust RSD (%)", row=1, col=2)
+    return _style(
+        fig,
+        f"Noise vs signal, per mass and hold (colour: setpoint; circle ↓ leg, diamond ↑ leg)<br><sup>{subtitle}</sup>",
+        560,
+    )
 
 
 def build_figs(outputs: dict[str, pl.DataFrame], settle_s: float) -> list[go.Figure]:
@@ -725,7 +783,10 @@ def main(argv: list[str] | None = None) -> int:
         write_df(df, args.out_dir, name, args.format)
 
     report = args.out_dir / "turbo_speed_report.html"
-    write_report([*build_figs(outputs, settle_s), *build_ratio_figs(outputs, args.ref_mass)], report)
+    write_report(
+        [*build_figs(outputs, settle_s), fig_noise_vs_signal(outputs["mass_stats_by_segment"]), *build_ratio_figs(outputs, args.ref_mass)],
+        report,
+    )
 
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200, fmt_float="mixed"):
         print(changes)
@@ -736,6 +797,7 @@ def main(argv: list[str] | None = None) -> int:
             .rename(lambda c: c if c == "setpoint" else f"rsd_m{c}")
         )
         print(outputs["rsd_speed_tests"])
+        print(outputs["noise_floor_summary"])
         print(f"signal / m{args.ref_mass}:")
         print(outputs["ratio_speed_tests"])
     print(f"wrote outputs and {report} to {args.out_dir}")
