@@ -573,27 +573,45 @@ def fig_mass_facets(
     return _style(fig, f"{y_title} vs turbo setpoint, per mass (settle excluded)", 280 * nrows + 120)
 
 
-def fig_tp(seg_tp: pl.DataFrame) -> go.Figure:
+def _fig_vs_speed(seg_tp: pl.DataFrame, col: str, y_title: str, hover: str, log_y: bool, title: str) -> go.Figure:
     fig = go.Figure()
     for leg, color in _LEG_COLORS.items():
-        d = seg_tp.filter(pl.col("leg") == leg).sort("setpoint")
+        d = seg_tp.filter((pl.col("leg") == leg) & pl.col(f"{col}_mean").is_not_null()).sort("setpoint")
         if d.is_empty():
             continue
         fig.add_trace(
             go.Scatter(
-                x=d["speed_hz_mean"], y=d["tp_torr_mean"],
+                x=d["speed_hz_mean"], y=d[f"{col}_mean"],
                 error_x={"type": "data", "array": d["speed_hz_std"].to_list(), "thickness": 1},
-                error_y={"type": "data", "array": d["tp_torr_std"].to_list(), "thickness": 1},
+                error_y={"type": "data", "array": d[f"{col}_std"].to_list(), "thickness": 1},
                 mode="lines+markers", line={"width": 2, "color": color, "dash": "solid" if leg == "down" else "dash"},
                 marker={"size": 8, "color": color, "symbol": "circle" if leg == "down" else "diamond"},
                 name=f"{leg} leg", customdata=d.select("segment", "n", "setpoint").to_numpy(),
-                hovertemplate="speed %{x:.0f} Hz (setpoint %{customdata[2]})<br>TP %{y:.3e} Torr"
+                hovertemplate=f"speed %{{x:.0f}} Hz (setpoint %{{customdata[2]}})<br>{hover}"
                 "<br>segment %{customdata[0]}, n=%{customdata[1]}<extra></extra>",
             )
         )
-    fig.update_yaxes(title_text="TP (Torr)", type="log", exponentformat="E", showexponent="all")
+    if not fig.data:
+        fig.add_annotation(text=f"no {y_title} readings", showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5)
+    if log_y:
+        fig.update_yaxes(type="log", exponentformat="E", showexponent="all")
+    fig.update_yaxes(title_text=y_title)
     fig.update_xaxes(title_text="measured speed (Hz)")
-    return _style(fig, "Total pressure vs measured turbo speed (mean ± std, settle excluded)", 480)
+    return _style(fig, title, 480)
+
+
+def fig_tp(seg_tp: pl.DataFrame) -> go.Figure:
+    return _fig_vs_speed(
+        seg_tp, "tp_torr", "TP (Torr)", "TP %{y:.3e} Torr", True,
+        "Total pressure vs measured turbo speed (mean ± std, settle excluded)",
+    )
+
+
+def fig_power(seg_tp: pl.DataFrame) -> go.Figure:
+    return _fig_vs_speed(
+        seg_tp, "power_w", "pump power (W)", "power %{y:.2f} W", False,
+        "Turbo pump power vs measured speed (mean ± std, settle excluded)",
+    )
 
 
 def _fmt_p(p: float | None) -> str:
@@ -720,6 +738,7 @@ def build_figs(outputs: dict[str, pl.DataFrame], settle_s: float) -> list[go.Fig
         fig_mass_facets(seg_stats, "rsd_pct", None, "RSD (%)", log_y=False, hover_fmt=".3g"),
         fig_rsd(seg_stats, outputs["rsd_speed_tests"]),
         fig_tp(outputs["tp_by_segment"]),
+        fig_power(outputs["tp_by_segment"]),
     ]
 
 
