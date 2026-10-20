@@ -13,8 +13,9 @@ comments = """
 Free text: weather, divers, anomalies, what was tested.
 """
 
-# Optional: processing parameters for this deployment. A CLI flag overrides these;
-# omitted keys fall back to the code defaults. The values actually used are
+# Optional: processing parameters for this deployment. Any key from egcf.toml's
+# [chamber], [cycles], [rga], [par] or [metabolism] sections may go here.
+# A CLI flag overrides these; omitted keys fall back to egcf.toml, then the code defaults. The values actually used are
 # recorded in processed/<deployment_id>/processing.parquet.
 # Give the area plus ONE of volume or height: flux scales with V/A, the mean water height.
 [processing]

@@ -31,6 +31,7 @@ src/egcf_processing/
   flux.py          # Layer D: benthic vertical flux from Layer C's cycle averages (+ per-experiment PAR)
   metabolism.py    # Layer E: light/dark O2 metabolism (R, NCP, GPP) + per-chamber Jassby-Platt P-I fit
   deployment.py    # deployment.toml loader/validator, one-row deployment table, [start, end) clip
+  config.py        # egcf.toml (+ egcf.local.toml) repo-wide settings loader/validator
   pipeline.py      # orchestrates the above; run(raw_dir, out_dir, chamber_volume_l, chamber_area_m2, ...)
   cli.py           # argparse entry point
 main.py            # thin shim -> egcf_processing.cli.main
@@ -65,8 +66,8 @@ flag (`--settle-offset-s`, `--format`, `--partial-pressure-sensitivity`,
 its output accordingly, that the `--chamber-volume-l`/`--chamber-area-m2`
 defaults (30 L, 0.30 m²) reach `pipeline.run()` and are overridden in the other tests via the
 shared `GEOMETRY` list (placeholder values that exercise the flux arithmetic, not real EGFC
-dimensions), and that the argparse defaults match `pipeline`'s
-`DEFAULT_*` constants. This is functional (real `main()` calls against a
+dimensions), and that unset flags fall back to `pipeline`'s `DEFAULT_*` constants
+(`PROCESSING_DEFAULTS`). This is functional (real `main()` calls against a
 tmp_path raw dir, real output files read back), not a mock of `pipeline.run`,
 consistent with the rest of the suite's preference for exercising real code
 over mocking.
@@ -105,21 +106,25 @@ copied into each; the window trims it.
   other tables join `deployment.parquet` on `deployment_id` instead.
 - `out_dir` also gets `deployment.parquet` (one row, `DEPLOYMENT_SCHEMA`) and a verbatim copy of
   `deployment.toml`, so processed output is self-describing.
-- **`[processing]` table** (optional): currently only chamber geometry -- `chamber_area_m2` plus
-  one of `chamber_volume_l` or `chamber_height_m` (positive numbers; unknown keys, or both volume
-  and height, are an error). `resolve_processing` applies precedence CLI flag > toml > code default
-  per `PROCESSING_GROUPS`, so volume and height are one quantity: `--chamber-height-m` beats a toml
-  `chamber_volume_l` rather than leaving both set. The CLI logs each value with its source, which
-  is why the geometry flags default to None in argparse (`--chamber-volume-l` and
-  `--chamber-height-m` are mutually exclusive). `pipeline.run()` itself takes the geometry as
-  explicit arguments (`chamber_volume_l` may be None when `chamber_height_m` is given) and does not
-  read `[processing]`; it completes it with `flux.chamber_geometry` and records volume, area,
-  height and `chamber_geometry_from` (`volume`/`height`) in `processing.parquet` (one row,
-  `PROCESSING_SCHEMA`). The dashboard's geometry
-  inputs reset to `processing.parquet` (else the toml, else defaults) whenever the loaded
-  directory changes, and otherwise keep the user's edits. To add a parameter, extend
-  `PROCESSING_SCHEMA`, the CLI resolution, and `saved_geometry`-style dashboard defaults.
-- CLI: with a toml and no `--out-dir`, output goes to `data/processed/<deployment_id>`; the window
+- **`[processing]` table** (optional): any numeric processing setting (`PROCESSING_KEYS`, the
+  same names as in `egcf.toml`'s `[chamber]`..`[metabolism]` sections and as `pipeline.run()`'s
+  kwargs) -- chamber geometry (`chamber_area_m2` plus one of `chamber_volume_l` or
+  `chamber_height_m`), `settle_offset_s`, RGA sensitivities, `par_time_offset_h`, and the
+  metabolism thresholds. `check_processing_value` requires numbers, positive for geometry,
+  sensitivities and transmittance; unknown keys, or both volume and height, are an error.
+  `resolve_processing` applies precedence CLI flag > deployment.toml > egcf.toml > code default
+  (`pipeline.PROCESSING_DEFAULTS`) per `PROCESSING_GROUPS`, so volume and height are one quantity:
+  `--chamber-height-m` beats a toml `chamber_volume_l` rather than leaving both set. The CLI logs
+  each value with its source, which is why those flags default to None in argparse.
+  `pipeline.run()` itself takes every value as an explicit argument (`chamber_volume_l` may be None
+  when `chamber_height_m` is given) and reads neither toml; it completes the geometry with
+  `flux.chamber_geometry` and records every value used plus `chamber_geometry_from`
+  (`volume`/`height`) in `processing.parquet` (one row, `PROCESSING_SCHEMA`). The dashboard's
+  geometry inputs reset to `processing.parquet` (else the toml, else egcf.toml, else defaults)
+  whenever the loaded directory changes, and otherwise keep the user's edits. To add a parameter,
+  add it to `PROCESSING_GROUPS`/`PROCESSING_SCHEMA`, `PROCESSING_DEFAULTS`, a `config.SECTIONS`
+  section, the CLI's `_PROCESSING_FLAGS`, and `egcf.toml`.
+- CLI: with a toml and no `--out-dir`, output goes to `<processed_root>/<deployment_id>`; the window
   is logged and `test = true` is a WARNING. `--par-start`/`--par-end` remain a separate PAR-only
   read-time cut.
 - Dashboard: the "Processed data directory" text input (default `data/processed`, and the first
@@ -134,6 +139,29 @@ copied into each; the window trims it.
   table via `clip_tables` before anything renders -- so the Rates and Metabolism tabs, which
   recompute from Layer A, follow it.
 - Not in scope: mapping HOBO serial numbers to chambers (the plot-title convention still applies).
+
+## Settings (`config.py`, `egcf.toml`)
+
+`egcf.toml` at the repo root holds repo-wide defaults: `[paths]` (`raw_root`, `processed_root`,
+`par_calibrations`), `[output]`, `[chamber]`, `[cycles]`, `[rga]`, `[par]`, `[metabolism]`,
+`[dashboard]` (`time_range_preset`, `experiment_variable`, `show_test_deployments`).
+
+- Sections only group keys for reading; `load_config` flattens them, and key names are identical to
+  deployment.toml `[processing]` keys and `run()` kwargs, so a line can be copied between files.
+  Unknown sections/keys and bad types are errors.
+- Lookup: `--config`, else `$EGCF_CONFIG`, else `./egcf.toml` (cwd); an explicit path must exist,
+  a missing default file means `{}`. A gitignored `egcf.local.toml` beside it overrides key by key
+  (a local volume or height displaces the other). Relative paths resolve against the config
+  file's folder.
+- The code `DEFAULT_*` constants remain the final fallback; `tests/test_config.py` asserts the
+  checked-in `egcf.toml` equals them, so change both together.
+- CLI: `raw_dir` may be a bare deployment id, resolved under `raw_root` when it isn't an existing
+  path. `--format` and `--par-calibrations` fall back to the config, then the code default.
+- Dashboard: reads the config each rerun for the data-directory default, the test-deployment
+  checkbox, the sensitivity/settling starting values, geometry (below the deployment layers), the
+  time-range preset and the experiment variable (an unknown preset/variable falls back silently).
+- `tests/conftest.py` points `$EGCF_CONFIG` at an empty file for every test, so local edits to
+  `egcf.toml` can't change test results.
 
 ## Two raw sources, one pipeline
 

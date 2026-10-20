@@ -22,7 +22,7 @@ uv sync                            # install deps
 uv run pytest -q                   # run the full test suite
 uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
-uv run main.py <raw_dir> [--out-dir <out_dir>] [--chamber-volume-l 30 | --chamber-height-m 0.1] [--chamber-area-m2 0.30] \
+uv run main.py <raw_dir | deployment_id> [--config egcf.toml] [--out-dir <out_dir>] [--chamber-volume-l 30 | --chamber-height-m 0.1] [--chamber-area-m2 0.30] \
     [--settle-offset-s 60] [--format parquet|csv] \
     [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>] \
     [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0] \
@@ -44,11 +44,20 @@ conventional `lander/`, `hobo/`, `par/` subfolders. With a toml: output defaults
 `data/processed/<deployment_id>`, Layer A is written untrimmed, Layers B–E are built from Layer A
 clipped to `[start, end)`, every table gets a `deployment_id` column, fluxes/metabolism/pi_fit get
 `condition`, and `deployment.parquet` + a copy of the toml land in the output. Without a toml,
-behaviour is unchanged. An optional `[processing]` table (for now just `chamber_area_m2` plus one of
-`chamber_volume_l` or `chamber_height_m`, since flux scales with V/A = mean water height) sets
-per-deployment geometry: CLI flag > toml > default, and the values used are
+behaviour is unchanged. An optional `[processing]` table overrides any processing setting from `egcf.toml` for that
+deployment (geometry is `chamber_area_m2` plus one of `chamber_volume_l` or `chamber_height_m`,
+since flux scales with V/A = mean water height), and all values used are
 written to `processing.parquet`. The dashboard picks deployments from `data/processed/` (tests hidden by
 default) and can narrow the window live. See `AGENTS.md` "Deployments".
+
+## Settings
+
+`egcf.toml` (repo root, committed) holds repo-wide defaults: raw/processed roots, PAR calibration
+path, output format, chamber geometry, settle offset, RGA sensitivities, PAR offset, metabolism
+thresholds, dashboard defaults. Precedence: CLI flag > deployment.toml `[processing]` > egcf.toml >
+code `DEFAULT_*`. Key names are the same in both tomls, so any processing key can be overridden per
+deployment. Machine-specific overrides go in gitignored `egcf.local.toml`. Loaded by `config.py`;
+tests are isolated from it via `tests/conftest.py`. See `AGENTS.md` "Settings".
 
 ## Architecture: five layers, one shared aggregator
 
@@ -56,6 +65,7 @@ default) and can narrow the window live. See `AGENTS.md` "Deployments".
 src/egcf_processing/
   lines.py       # parse_line(payload) -> dict|None -- the core per-line grammar
   deployment.py  # deployment.toml loader/validator, one-row deployment table, [start, end) clip
+  config.py      # egcf.toml (+ egcf.local.toml) repo-wide settings loader/validator
   discovery.py   # find gems_*.txt + surface_*_lander.log files, merge by rotation ts, skip 0-byte; find PAR CSVs
   reader.py      # read files in order (dispatch on filename), concatenate parsed records
   events.py      # surface_*_events.log grammar: the SYSTEM battery voltage/current/temp line

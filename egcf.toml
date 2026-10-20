@@ -1,0 +1,46 @@
+# egcf.toml -- repo-wide defaults for egcf-processing (CLI and dashboard).
+#
+# Precedence: CLI flag > deployment.toml [processing] > this file > code default.
+# Sections only group keys for reading: key names are the same everywhere, so any
+# key under [chamber] .. [metabolism] can be copied into a deployment.toml
+# [processing] table to override it for one deployment. The values a run actually
+# used are recorded in processed/<deployment_id>/processing.parquet.
+#
+# Machine-specific overrides (e.g. raw data on an external drive) go in a
+# gitignored egcf.local.toml beside this file, using the same layout.
+# Relative paths are relative to this file. Delete a line to use the code default.
+
+[paths]
+raw_root = "data/raw"                # `uv run main.py <deployment_id>` looks here
+processed_root = "data/processed"    # output goes to processed_root/<deployment_id>; the dashboard lists it
+par_calibrations = "src/egcf_processing/par_calibrations.csv"
+
+[output]
+output_format = "parquet"            # parquet | csv
+
+[chamber]
+chamber_area_m2 = 0.30               # sediment footprint per chamber, m^2 (C1 and C2)
+chamber_volume_l = 30.0              # enclosed water volume per chamber, L
+# chamber_height_m = 0.10            # or: mean water height, m (give volume OR height, not both)
+
+[cycles]
+settle_offset_s = 60.0               # s excluded from the start of each chamber cycle before averaging
+
+[rga]
+partial_pressure_sensitivity_a_per_torr = 8.01e-5   # A/Torr, per-mass ion current -> Torr
+total_pressure_sensitivity_a_per_torr = 1.34e-5     # A/Torr, total pressure current -> Torr
+n2_ar_sensitivity_ratio = 1.0        # mass-28/mass-40 sensitivity; 1.0 = uncalibrated, N2:Ar flux not quantitative
+
+[par]
+par_time_offset_h = 0.0              # h added to PAR logger time to reach lander UTC; recheck every deployment
+
+[metabolism]
+dark_par_threshold_umol_m2_s = 20.0  # experiments with mean PAR below this are dark (respiration)
+min_par_coverage = 0.9               # min fraction of an experiment covered by PAR for its O2 flux to be used
+metabolism_min_r2 = 0.0              # min O2 flux fit r2 (0: near-zero fluxes have low r2)
+chamber_par_transmittance = 1.0      # fraction of ambient PAR reaching the sediment; 1.0 = unmeasured
+
+[dashboard]
+time_range_preset = "Last 7 days"
+experiment_variable = "oxygen_mgL"
+show_test_deployments = false

@@ -10,7 +10,7 @@ from egcf_processing.cli import main
 from egcf_processing.flux import chamber_geometry
 from egcf_processing.dashboard import clip_tables, deployment_label, list_processed_dirs, parse_window_time
 from egcf_processing.deployment import DEPLOYMENT_SCHEMA, clip, deployment_table, load_deployment, resolve_processing
-from egcf_processing.pipeline import run
+from egcf_processing.pipeline import PROCESSING_DEFAULTS, run
 
 DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "src" / "egcf_processing" / "dashboard.py"
 
@@ -292,10 +292,12 @@ def test_pipeline_records_processing_parameters_used(tmp_path):
     assert processing.to_dicts() == [
         {
             "deployment_id": "2026-01-01_hadley",
+            **PROCESSING_DEFAULTS,
             "chamber_volume_l": 4.0,
             "chamber_area_m2": 0.06,
             "chamber_height_m": pytest.approx(4.0 / 0.06 / 1000),
             "chamber_geometry_from": "volume",
+            "settle_offset_s": 0.0,
         }
     ]
 

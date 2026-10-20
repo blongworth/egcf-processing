@@ -40,6 +40,20 @@ DEFAULT_MIN_PAR_COVERAGE = metabolism.DEFAULT_MIN_PAR_COVERAGE
 DEFAULT_METABOLISM_MIN_R2 = metabolism.DEFAULT_MIN_R2
 DEFAULT_CHAMBER_PAR_TRANSMITTANCE = metabolism.DEFAULT_CHAMBER_PAR_TRANSMITTANCE
 
+PROCESSING_DEFAULTS = {
+    "chamber_area_m2": DEFAULT_CHAMBER_AREA_M2,
+    "chamber_volume_l": DEFAULT_CHAMBER_VOLUME_L,
+    "settle_offset_s": DEFAULT_SETTLE_OFFSET_S,
+    "partial_pressure_sensitivity_a_per_torr": DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+    "total_pressure_sensitivity_a_per_torr": DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+    "n2_ar_sensitivity_ratio": DEFAULT_N2_AR_SENSITIVITY_RATIO,
+    "par_time_offset_h": DEFAULT_PAR_TIME_OFFSET_H,
+    "dark_par_threshold_umol_m2_s": DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S,
+    "min_par_coverage": DEFAULT_MIN_PAR_COVERAGE,
+    "metabolism_min_r2": DEFAULT_METABOLISM_MIN_R2,
+    "chamber_par_transmittance": DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
+}
+
 
 def _tag(df: pl.DataFrame, meta: dict | None) -> pl.DataFrame:
     """Prefix a literal deployment_id column so concatenated deployments stay unambiguous."""
@@ -82,7 +96,19 @@ def run(
     meta = deployment.load_deployment(raw_dir)
     if meta is not None:
         combine.write_df(deployment.deployment_table(meta), out_dir, "deployment", output_format)
-        used = {**geometry, "chamber_geometry_from": "volume" if chamber_height_m is None else "height"}
+        used = {
+            **geometry,
+            "chamber_geometry_from": "volume" if chamber_height_m is None else "height",
+            "settle_offset_s": settle_offset_s,
+            "partial_pressure_sensitivity_a_per_torr": partial_pressure_sensitivity_a_per_torr,
+            "total_pressure_sensitivity_a_per_torr": total_pressure_sensitivity_a_per_torr,
+            "n2_ar_sensitivity_ratio": n2_ar_sensitivity_ratio,
+            "par_time_offset_h": par_time_offset_h,
+            "dark_par_threshold_umol_m2_s": dark_par_threshold_umol_m2_s,
+            "min_par_coverage": min_par_coverage,
+            "metabolism_min_r2": metabolism_min_r2,
+            "chamber_par_transmittance": chamber_par_transmittance,
+        }
         combine.write_df(deployment.processing_table(meta, used), out_dir, "processing", output_format)
         shutil.copyfile(raw_dir / deployment.DEPLOYMENT_FILENAME, out_dir / deployment.DEPLOYMENT_FILENAME)
 

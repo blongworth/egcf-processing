@@ -12,5 +12,8 @@ wheels/
 # Data (raw and processed) -- not tracked in git
 /data/*
 
+# Machine-specific settings overriding egcf.toml
+egcf.local.toml
+
 # OS cruft
 .DS_Store

@@ -41,11 +41,41 @@ PROCESSING_SCHEMA = {
     "chamber_area_m2": pl.Float64,
     "chamber_height_m": pl.Float64,
     "chamber_geometry_from": pl.Utf8,
+    "settle_offset_s": pl.Float64,
+    "partial_pressure_sensitivity_a_per_torr": pl.Float64,
+    "total_pressure_sensitivity_a_per_torr": pl.Float64,
+    "n2_ar_sensitivity_ratio": pl.Float64,
+    "par_time_offset_h": pl.Float64,
+    "dark_par_threshold_umol_m2_s": pl.Float64,
+    "min_par_coverage": pl.Float64,
+    "metabolism_min_r2": pl.Float64,
+    "chamber_par_transmittance": pl.Float64,
 }
 
 # Each group is one quantity: a source (argument, toml, default) supplies at most one key per group.
-PROCESSING_GROUPS = (("chamber_area_m2",), ("chamber_volume_l", "chamber_height_m"))
+PROCESSING_GROUPS = (
+    ("chamber_area_m2",),
+    ("chamber_volume_l", "chamber_height_m"),
+    ("settle_offset_s",),
+    ("partial_pressure_sensitivity_a_per_torr",),
+    ("total_pressure_sensitivity_a_per_torr",),
+    ("n2_ar_sensitivity_ratio",),
+    ("par_time_offset_h",),
+    ("dark_par_threshold_umol_m2_s",),
+    ("min_par_coverage",),
+    ("metabolism_min_r2",),
+    ("chamber_par_transmittance",),
+)
 PROCESSING_KEYS = [k for group in PROCESSING_GROUPS for k in group]
+_POSITIVE_KEYS = (
+    "chamber_area_m2",
+    "chamber_volume_l",
+    "chamber_height_m",
+    "partial_pressure_sensitivity_a_per_torr",
+    "total_pressure_sensitivity_a_per_torr",
+    "n2_ar_sensitivity_ratio",
+    "chamber_par_transmittance",
+)
 
 _REQUIRED = ("site", "start", "c1", "c2", "test")
 _ALLOWED = ("site", "lat", "lon", "start", "end", "test", "c1", "c2", "comments", "processing")
@@ -103,34 +133,49 @@ def parse_deployment(raw: dict, deployment_id: str, path: Path) -> dict:
     }
 
 
+def check_processing_value(key: str, value, where: str) -> float:
+    if key in _POSITIVE_KEYS:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{where} {key} must be a positive number, got {value!r}")
+    elif isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where} {key} must be a number, got {value!r}")
+    return float(value)
+
+
 def _parse_processing(raw, path: Path) -> dict:
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: processing must be a [processing] table")
     unknown = sorted(set(raw) - set(PROCESSING_KEYS))
     if unknown:
         raise ValueError(f"{path}: unknown [processing] key(s) {unknown}; allowed: {PROCESSING_KEYS}")
-    for key, value in raw.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise ValueError(f"{path}: [processing] {key} must be a positive number, got {value!r}")
     for group in PROCESSING_GROUPS:
         given = [k for k in group if k in raw]
         if len(given) > 1:
             raise ValueError(f"{path}: [processing] give only one of {given}")
-    return {k: float(v) for k, v in raw.items()}
+    return {k: check_processing_value(k, v, f"{path}: [processing]") for k, v in raw.items()}
 
 
-def resolve_processing(meta: dict | None, overrides: dict, defaults: dict) -> dict[str, tuple[float, str]]:
-    """Each processing parameter's value and where it came from: argument > deployment.toml > default.
+def resolve_processing(
+    meta: dict | None, overrides: dict, defaults: dict, config: dict | None = None
+) -> dict[str, tuple[float, str]]:
+    """Each processing parameter's value and where it came from: argument > deployment.toml > egcf.toml > default.
 
     Resolved per group, so e.g. --chamber-height-m beats a toml chamber_volume_l
     rather than leaving both set; the result has one key per group. An override
-    of None means "not given"; defaults must supply one key per group.
+    of None means "not given"; defaults must supply one key per group. config
+    is the egcf.toml settings; its non-processing keys are ignored.
     """
     from_toml = meta["processing"] if meta is not None else {}
     given = {k: v for k, v in overrides.items() if v is not None}
+    sources = (
+        (given, "argument"),
+        (from_toml, DEPLOYMENT_FILENAME),
+        (config or {}, "egcf.toml"),
+        (defaults, "default"),
+    )
     resolved = {}
     for group in PROCESSING_GROUPS:
-        for values, source in ((given, "argument"), (from_toml, DEPLOYMENT_FILENAME), (defaults, "default")):
+        for values, source in sources:
             hits = [k for k in group if k in values]
             if len(hits) > 1:
                 raise ValueError(f"give only one of {hits} ({source})")

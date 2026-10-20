@@ -23,6 +23,7 @@ from egcf_processing.aggregate import (
     aggregate_onto_windows,
     match_readings_to_windows,
 )
+from egcf_processing.config import load_config
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
 from egcf_processing.deployment import clip, load_deployment
 from egcf_processing.cycles import chamber_cycle_windows, experiment_spans
@@ -141,13 +142,17 @@ GEOMETRY_FROM_VOLUME = "Volume (L)"
 GEOMETRY_FROM_HEIGHT = "Height (m)"
 
 
-def _default_geometry() -> dict:
-    return {
-        "chamber_geometry_from": GEOMETRY_FROM_VOLUME,
-        "chamber_volume_l": DEFAULT_CHAMBER_VOLUME_L,
-        "chamber_area_m2": DEFAULT_CHAMBER_AREA_M2,
-        "chamber_height_m": DEFAULT_CHAMBER_VOLUME_L / DEFAULT_CHAMBER_AREA_M2 / L_PER_M3,
-    }
+_DEPTH_KEYS = ("chamber_volume_l", "chamber_height_m")
+
+
+def _overlay_geometry(given: dict, layer: dict) -> dict:
+    """given with layer's geometry on top; a layer's volume or height displaces the other."""
+    given = dict(given)
+    if any(k in layer for k in _DEPTH_KEYS):
+        for k in _DEPTH_KEYS:
+            given.pop(k, None)
+    given.update({k: layer[k] for k in ("chamber_area_m2", *_DEPTH_KEYS) if k in layer})
+    return given
 
 
 def _convert_geometry_input() -> None:
@@ -162,31 +167,32 @@ def _convert_geometry_input() -> None:
         state["chamber_volume_l"] = state["chamber_height_m"] * area * L_PER_M3
 
 
-def saved_geometry(data_dir: Path) -> dict:
-    """Sidebar geometry state: the run's processing table, else the toml's [processing], else the defaults.
+def saved_geometry(data_dir: Path | None, settings: dict | None = None) -> dict:
+    """Sidebar geometry state: the run's processing table, else the toml's [processing], else egcf.toml, else
+    the code defaults.
 
     Volume and height are both filled in (one derived from the other) so
     switching the input mode starts from a consistent value.
     """
-    geometry = _default_geometry()
-    given = {}
-    meta = load_deployment(data_dir)
+    geometry = {"chamber_geometry_from": GEOMETRY_FROM_VOLUME}
+    given = {"chamber_area_m2": DEFAULT_CHAMBER_AREA_M2, "chamber_volume_l": DEFAULT_CHAMBER_VOLUME_L}
+    given = _overlay_geometry(given, settings or {})
+    meta = load_deployment(data_dir) if data_dir is not None else None
     if meta is not None:
-        given = dict(meta["processing"])
-    processing = load_table(data_dir, "processing")
+        given = _overlay_geometry(given, meta["processing"])
+    processing = load_table(data_dir, "processing") if data_dir is not None else None
     if processing is not None and processing.height:
         row = processing.row(0, named=True)
-        given = {"chamber_area_m2": row["chamber_area_m2"]}
         key = "chamber_height_m" if row.get("chamber_geometry_from") == "height" else "chamber_volume_l"
-        given[key] = row[key]
-    area = given.get("chamber_area_m2", geometry["chamber_area_m2"])
+        given = _overlay_geometry(given, {"chamber_area_m2": row["chamber_area_m2"], key: row[key]})
+    area = given["chamber_area_m2"]
     geometry["chamber_area_m2"] = area
     if "chamber_height_m" in given:
         geometry["chamber_geometry_from"] = GEOMETRY_FROM_HEIGHT
         geometry["chamber_height_m"] = given["chamber_height_m"]
         geometry["chamber_volume_l"] = given["chamber_height_m"] * area * L_PER_M3
     else:
-        geometry["chamber_volume_l"] = given.get("chamber_volume_l", geometry["chamber_volume_l"])
+        geometry["chamber_volume_l"] = given["chamber_volume_l"]
         geometry["chamber_height_m"] = geometry["chamber_volume_l"] / area / L_PER_M3
     return geometry
 
@@ -376,10 +382,11 @@ def render_time_range_control(bounds: tuple[datetime, datetime]) -> tuple[dateti
     st.header("Time range")
     st.caption("Applies to every tab. Rates and Fluxes and Metabolism keep the experiments that start in the range.")
     options = [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE]
+    default = load_config().get("time_range_preset", DEFAULT_TIME_RANGE_PRESET)
     preset = st.selectbox(
         "Preset",
         options,
-        index=options.index(DEFAULT_TIME_RANGE_PRESET),
+        index=options.index(default if default in options else DEFAULT_TIME_RANGE_PRESET),
         key="time_range_preset",
         on_change=_seed_custom_time_range,
     )
@@ -1226,7 +1233,8 @@ DEFAULT_EXPERIMENT_VARIABLE = "oxygen_mgL"
 
 def _experiment_variable_select(options: list[str]) -> str:
     """The Variable selectbox both grains share, defaulting to oxygen when it's offered."""
-    index = options.index(DEFAULT_EXPERIMENT_VARIABLE) if DEFAULT_EXPERIMENT_VARIABLE in options else 0
+    default = load_config().get("experiment_variable", DEFAULT_EXPERIMENT_VARIABLE)
+    index = options.index(default) if default in options else 0
     return st.selectbox("Variable", options, index=index, key="experiment_variable")
 
 
@@ -1980,10 +1988,11 @@ def main() -> None:
     st.set_page_config(page_title="EGFC Dashboard", layout="wide")
     st.title("EGFC Lander Dashboard")
 
+    settings = load_config()
     st.sidebar.header("Data source")
     data_dir_input = st.sidebar.text_input(
         "Processed data directory",
-        value=str(DEFAULT_PROCESSED_ROOT),
+        value=str(settings.get("processed_root", DEFAULT_PROCESSED_ROOT)),
         help="A folder of deployments (one subfolder each), or a single deployment's output folder.",
     )
     source_dir = Path(data_dir_input.strip())
@@ -1994,7 +2003,9 @@ def main() -> None:
     elif is_processed_dir(source_dir) or not list_processed_dirs(source_dir, show_test=True):
         data_dir = source_dir
     else:
-        show_test = st.sidebar.checkbox("Show test deployments", value=False, key="show_test_deployments")
+        show_test = st.sidebar.checkbox(
+            "Show test deployments", value=settings.get("show_test_deployments", False), key="show_test_deployments"
+        )
         candidates = list_processed_dirs(source_dir, show_test)
         if candidates:
             labels = [deployment_label(path, meta) for path, meta in candidates]
@@ -2008,12 +2019,14 @@ def main() -> None:
     time_range_slot = st.sidebar.container()
     partial_pressure_sensitivity = st.sidebar.number_input(
         "Partial pressure sensitivity (A/Torr)",
-        value=DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+        value=settings.get(
+            "partial_pressure_sensitivity_a_per_torr", DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR
+        ),
         format="%.2e",
     )
     total_pressure_sensitivity = st.sidebar.number_input(
         "Total pressure sensitivity (A/Torr)",
-        value=DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+        value=settings.get("total_pressure_sensitivity_a_per_torr", DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR),
         format="%.2e",
     )
 
@@ -2022,7 +2035,7 @@ def main() -> None:
         "Settling time after valve switch (s)",
         min_value=0,
         max_value=300,
-        value=int(DEFAULT_SETTLE_OFFSET_S),
+        value=int(settings.get("settle_offset_s", DEFAULT_SETTLE_OFFSET_S)),
         key="settle_offset_s",
         help="Readings this soon after each valve switch are left out of cycle averages, fluxes and metabolism.",
     )
@@ -2032,7 +2045,7 @@ def main() -> None:
     # then leave the inputs alone so a user edit survives reruns.
     # The saved copy also refills an input Streamlit dropped while the other mode was showing.
     if st.session_state.get("_geometry_dir") != str(data_dir):
-        saved = saved_geometry(data_dir) if data_dir is not None else _default_geometry()
+        saved = saved_geometry(data_dir, settings)
         st.session_state["_geometry_saved"] = saved
         st.session_state.update(saved)
         st.session_state["_geometry_dir"] = str(data_dir)
