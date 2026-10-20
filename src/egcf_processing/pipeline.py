@@ -3,10 +3,26 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 
-from egcf_processing import aggregate, combine, cycles, discovery, events, flux, hobo, metabolism, par, reader, rga_scans
+import polars as pl
+
+from egcf_processing import (
+    aggregate,
+    combine,
+    cycles,
+    deployment,
+    discovery,
+    events,
+    flux,
+    hobo,
+    metabolism,
+    par,
+    reader,
+    rga_scans,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +39,13 @@ DEFAULT_DARK_PAR_THRESHOLD_UMOL_M2_S = metabolism.DEFAULT_DARK_PAR_THRESHOLD_UMO
 DEFAULT_MIN_PAR_COVERAGE = metabolism.DEFAULT_MIN_PAR_COVERAGE
 DEFAULT_METABOLISM_MIN_R2 = metabolism.DEFAULT_MIN_R2
 DEFAULT_CHAMBER_PAR_TRANSMITTANCE = metabolism.DEFAULT_CHAMBER_PAR_TRANSMITTANCE
+
+
+def _tag(df: pl.DataFrame, meta: dict | None) -> pl.DataFrame:
+    """Prefix a literal deployment_id column so concatenated deployments stay unambiguous."""
+    if meta is None:
+        return df
+    return df.select(pl.lit(meta["deployment_id"]).alias("deployment_id"), pl.all())
 
 
 def run(
@@ -46,6 +69,11 @@ def run(
     metabolism_min_r2: float = DEFAULT_METABOLISM_MIN_R2,
     chamber_par_transmittance: float = DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
 ) -> dict:
+    meta = deployment.load_deployment(raw_dir)
+    if meta is not None:
+        combine.write_df(deployment.deployment_table(meta), out_dir, "deployment", output_format)
+        shutil.copyfile(raw_dir / deployment.DEPLOYMENT_FILENAME, out_dir / deployment.DEPLOYMENT_FILENAME)
+
     files = discovery.find_all_files(raw_dir)
     logger.info("found %d gems_*.txt/surface_*_lander.log file(s) under %s", len(files), raw_dir)
 
@@ -57,7 +85,7 @@ def run(
     records.extend(events.read_all_events(event_files))
 
     tables = combine.build_tables(records)
-    written = combine.write_tables(tables, out_dir, output_format)
+    written = combine.write_tables({name: _tag(df, meta) for name, df in tables.items()}, out_dir, output_format)
     for name, path in written.items():
         logger.info("wrote %s (%d rows) -> %s", name, tables[name].height, path)
 
@@ -67,12 +95,12 @@ def run(
     par_table = par.read_all_par(
         par_files, par.load_calibrations(par_calibrations_path), par_time_offset_h, par_start, par_end
     )
-    par_path = combine.write_df(par_table, out_dir, "par", output_format)
+    par_path = combine.write_df(_tag(par_table, meta), out_dir, "par", output_format)
     logger.info("wrote par (%d rows) -> %s", par_table.height, par_path)
     par_daily = par.daily_par(par_table)
-    par_daily_path = combine.write_df(par_daily, out_dir, "par_daily", output_format)
+    par_daily_path = combine.write_df(_tag(par_daily, meta), out_dir, "par_daily", output_format)
     logger.info("wrote par_daily (%d rows) -> %s", par_daily.height, par_daily_path)
-    trend = par.daily_max_trend(par_daily)
+    trend = par.daily_max_trend(par.daily_par(deployment.clip(par_table, meta)))
     if trend is not None:
         logger.info(
             "daily max PAR trend over %d full day(s): %+.1f umol m-2 s-1 per day (%+.1f%%/day, r2=%.2f) -- "
@@ -87,41 +115,44 @@ def run(
     hobo_files = discovery.find_hobo_files(hobo_search_dir)
     logger.info("found %d HOBO oxygen logger export(s) under %s", len(hobo_files), hobo_search_dir)
     hobo_table = hobo.read_all_hobo(hobo_files)
-    hobo_path = combine.write_df(hobo_table, out_dir, "hobo_oxygen", output_format)
+    hobo_path = combine.write_df(_tag(hobo_table, meta), out_dir, "hobo_oxygen", output_format)
     logger.info("wrote hobo_oxygen (%d rows) -> %s", hobo_table.height, hobo_path)
 
-    chamber_windows, cycle_stats = cycles.chamber_cycle_windows(tables["valve"], settle_offset_s)
+    clipped = {name: deployment.clip(df, meta) for name, df in tables.items()}
+    par_clipped = deployment.clip(par_table, meta)
+
+    chamber_windows, cycle_stats = cycles.chamber_cycle_windows(clipped["valve"], settle_offset_s)
     logger.info(
         "chamber cycles: %d valid, %d dropped as too-short",
         cycle_stats["total_cycles"] - cycle_stats["dropped_too_short"],
         cycle_stats["dropped_too_short"],
     )
 
-    scan_windows = rga_scans.rga_scan_windows(tables["rga"])
+    scan_windows = rga_scans.rga_scan_windows(clipped["rga"])
     scan_windows = rga_scans.attach_chamber_context(scan_windows, chamber_windows)
 
     layer_b = aggregate.aggregate_onto_windows(
         scan_windows,
-        tables["rga"],
-        tables["scalup"],
-        tables["status"],
+        clipped["rga"],
+        clipped["scalup"],
+        clipped["status"],
         partial_pressure_sensitivity_a_per_torr,
         total_pressure_sensitivity_a_per_torr,
-        par=par_table,
+        par=par_clipped,
     )
     layer_c = aggregate.aggregate_onto_windows(
         chamber_windows,
-        tables["rga"],
-        tables["scalup"],
-        tables["status"],
+        clipped["rga"],
+        clipped["scalup"],
+        clipped["status"],
         partial_pressure_sensitivity_a_per_torr,
         total_pressure_sensitivity_a_per_torr,
-        par=par_table,
+        par=par_clipped,
     )
 
     layer_d = flux.compute_fluxes(layer_c, chamber_volume_l, chamber_area_m2, n2_ar_sensitivity_ratio)
     layer_d = flux.attach_experiment_par(
-        layer_d, par_table, cycles.experiment_spans(chamber_windows, settle_offset_s)
+        layer_d, par_clipped, cycles.experiment_spans(chamber_windows, settle_offset_s)
     )
     if n2_ar_sensitivity_ratio == 1.0:
         logger.warning(
@@ -139,6 +170,13 @@ def run(
             "to ambient PAR at the logger, not PAR at the sediment inside the chamber"
         )
 
+    if meta is not None:
+        condition = deployment.chamber_condition_expr(meta)
+        layer_d = layer_d.with_columns(condition)
+        layer_e = layer_e.with_columns(condition)
+        pi_fit = pi_fit.with_columns(condition)
+    layer_b, layer_c, layer_d, layer_e, pi_fit = (_tag(df, meta) for df in (layer_b, layer_c, layer_d, layer_e, pi_fit))
+
     scans_path = combine.write_df(layer_b, out_dir, "egcf_rga_scans", output_format)
     cycles_path = combine.write_df(layer_c, out_dir, "egcf_chamber_cycles", output_format)
     fluxes_path = combine.write_df(layer_d, out_dir, "egcf_fluxes", output_format)
@@ -151,6 +189,7 @@ def run(
     logger.info("wrote pi_fit (%d rows) -> %s", pi_fit.height, pi_fit_path)
 
     return {
+        "deployment_id": meta["deployment_id"] if meta is not None else None,
         "n_files": len(files),
         "n_records": len(records),
         "n_system_health_rows": tables["system_health"].height,

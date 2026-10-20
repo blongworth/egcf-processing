@@ -5,6 +5,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
+DEFAULT_OUT_ROOT = Path("data/processed")
+
+from egcf_processing.deployment import load_deployment
 from egcf_processing.pipeline import (
     DEFAULT_CHAMBER_AREA_M2,
     DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
@@ -25,9 +30,15 @@ from egcf_processing.pipeline import (
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="egcf-process")
-    parser.add_argument("raw_dir", type=Path, help="Directory containing gems_*.txt files")
     parser.add_argument(
-        "--out-dir", type=Path, default=Path("data/processed"), help="Output directory for output files"
+        "raw_dir", type=Path, help="Deployment directory (gems/surface logs, PAR, HOBO, optional deployment.toml)"
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Output directory; defaults to data/processed/<deployment_id> when raw_dir has a deployment.toml, "
+        "else data/processed",
     )
     parser.add_argument(
         "--settle-offset-s",
@@ -139,9 +150,25 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
+    meta = load_deployment(args.raw_dir)
+    out_dir = args.out_dir
+    if meta is None:
+        out_dir = out_dir or DEFAULT_OUT_ROOT
+        logger.info("no deployment.toml in %s: processing everything, untrimmed", args.raw_dir)
+    else:
+        out_dir = out_dir or DEFAULT_OUT_ROOT / meta["deployment_id"]
+        logger.info(
+            "deployment %s at %s, window [%s, %s) UTC",
+            meta["deployment_id"],
+            meta["site"],
+            meta["start"],
+            meta["end"] or "open",
+        )
+        if meta["test"]:
+            logger.warning("*** %s is a TEST deployment (test = true) ***", meta["deployment_id"])
     run(
         args.raw_dir,
-        args.out_dir,
+        out_dir,
         chamber_volume_l=args.chamber_volume_l,
         chamber_area_m2=args.chamber_area_m2,
         settle_offset_s=args.settle_offset_s,

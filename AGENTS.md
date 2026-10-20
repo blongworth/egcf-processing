@@ -30,6 +30,7 @@ src/egcf_processing/
   aggregate.py     # shared windowed aggregation used by both Layer B and C
   flux.py          # Layer D: benthic vertical flux from Layer C's cycle averages (+ per-experiment PAR)
   metabolism.py    # Layer E: light/dark O2 metabolism (R, NCP, GPP) + per-chamber Jassby-Platt P-I fit
+  deployment.py    # deployment.toml loader/validator, one-row deployment table, [start, end) clip
   pipeline.py      # orchestrates the above; run(raw_dir, out_dir, chamber_volume_l, chamber_area_m2, ...)
   cli.py           # argparse entry point
 main.py            # thin shim -> egcf_processing.cli.main
@@ -69,6 +70,56 @@ dimensions), and that the argparse defaults match `pipeline`'s
 tmp_path raw dir, real output files read back), not a mock of `pipeline.run`,
 consistent with the rest of the suite's preference for exercising real code
 over mocking.
+
+## Deployments (`deployment.py`)
+
+One raw folder per deployment, named by its `deployment_id`, holding a human-edited
+`deployment.toml` (template: `deployment.toml.example` at the repo root):
+
+```
+data/raw/<deployment_id>/
+  deployment.toml
+  lander/   gems_*.txt and/or surface_*_lander.log / _events.log
+  hobo/     HOBOware CSV exports
+  par/      Odyssey CSVs
+```
+
+The subfolder names are convention only -- discovery is recursive and content-based, and
+`--par-dir`/`--hobo-dir` default to `raw_dir`. A PAR/HOBO file spanning several deployments is
+copied into each; the window trims it.
+
+- **Validation** (`parse_deployment`): `site`, `start`, `c1`, `c2`, `test` required; `lat`, `lon`,
+  `end`, `comments` optional; unknown keys are an error (typo guard). `start`/`end` must be TOML
+  datetimes **with an offset** -- a naive time is rejected, never assumed UTC -- and are normalized
+  to naive UTC like every other timestamp in the pipeline. `c1`/`c2` are `grass | sediment | none`.
+- **No toml -> `load_deployment` returns None** and the pipeline behaves exactly as before (no
+  trimming, no `deployment_id` column). The existing tests rely on this.
+- **Layer A is written untrimmed** (status, rga, scalup, valve, system_health, par, par_daily,
+  hobo_oxygen) so changing the window never needs a re-parse. **Layers B-E are built from
+  `clip()`-ed copies** (half-open `[start, end)`); clipping `valve` means no cycle can start outside
+  the window, so experiment numbering restarts at 1 inside it. The PAR biofouling-trend log line
+  uses the clipped PAR, since deck days would distort it.
+- With a toml, every written table gets a leading literal `deployment_id` column, so
+  `(deployment_id, experiment_number, chamber)` is a global key across concatenated deployments.
+  `egcf_fluxes`, `egcf_metabolism` and `egcf_pi_fit` also get `condition` (C1 -> `c1`, C2 -> `c2`);
+  other tables join `deployment.parquet` on `deployment_id` instead.
+- `out_dir` also gets `deployment.parquet` (one row, `DEPLOYMENT_SCHEMA`) and a verbatim copy of
+  `deployment.toml`, so processed output is self-describing.
+- CLI: with a toml and no `--out-dir`, output goes to `data/processed/<deployment_id>`; the window
+  is logged and `test = true` is a WARNING. `--par-start`/`--par-end` remain a separate PAR-only
+  read-time cut.
+- Dashboard: the "Processed data directory" text input (default `data/processed`, and the first
+  sidebar text input -- existing AppTests drive `sidebar.text_input[0]`) is either a single
+  deployment's output, loaded directly with no picker, or a root of deployments, in which case a
+  "Show test deployments" checkbox and a "Deployment" selectbox over its subfolders appear
+  (newest name first). "Processed" means it holds `deployment.parquet` or a dashboard table -- a
+  toml alone doesn't count, since raw deployment folders have one too. A folder that is neither
+  loads as an empty dataset, as before.
+  A toml in the loaded dir shows a header (site, lat/lon, C1/C2, notes, TEST warning) and sidebar
+  window start/end inputs (keyed per deployment, defaulting to the toml) that trim every loaded
+  table via `clip_tables` before anything renders -- so the Rates and Metabolism tabs, which
+  recompute from Layer A, follow it.
+- Not in scope: mapping HOBO serial numbers to chambers (the plot-title convention still applies).
 
 ## Two raw sources, one pipeline
 

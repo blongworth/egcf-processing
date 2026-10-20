@@ -22,7 +22,7 @@ uv sync                            # install deps
 uv run pytest -q                   # run the full test suite
 uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
-uv run main.py <raw_dir> --out-dir <out_dir> [--chamber-volume-l 30] [--chamber-area-m2 0.30] \
+uv run main.py <raw_dir> [--out-dir <out_dir>] [--chamber-volume-l 30] [--chamber-area-m2 0.30] \
     [--settle-offset-s 60] [--format parquet|csv] \
     [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>] \
     [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0] \
@@ -35,11 +35,24 @@ non-obvious, explicit polars schemas, functions over classes.
 
 `data/` is gitignored — raw logs and processed output live there and are never committed.
 
+## Deployments
+
+Raw data is organized one folder per deployment, `data/raw/<deployment_id>/` (folder name = id),
+with a hand-edited `deployment.toml` (site, lat/lon, in-water `start`/`end` with a tz offset,
+`test`, `c1`/`c2` = grass|sediment|none, comments; template in `deployment.toml.example`) and
+conventional `lander/`, `hobo/`, `par/` subfolders. With a toml: output defaults to
+`data/processed/<deployment_id>`, Layer A is written untrimmed, Layers B–E are built from Layer A
+clipped to `[start, end)`, every table gets a `deployment_id` column, fluxes/metabolism/pi_fit get
+`condition`, and `deployment.parquet` + a copy of the toml land in the output. Without a toml,
+behaviour is unchanged. The dashboard picks deployments from `data/processed/` (tests hidden by
+default) and can narrow the window live. See `AGENTS.md` "Deployments".
+
 ## Architecture: five layers, one shared aggregator
 
 ```
 src/egcf_processing/
   lines.py       # parse_line(payload) -> dict|None -- the core per-line grammar
+  deployment.py  # deployment.toml loader/validator, one-row deployment table, [start, end) clip
   discovery.py   # find gems_*.txt + surface_*_lander.log files, merge by rotation ts, skip 0-byte; find PAR CSVs
   reader.py      # read files in order (dispatch on filename), concatenate parsed records
   events.py      # surface_*_events.log grammar: the SYSTEM battery voltage/current/temp line
