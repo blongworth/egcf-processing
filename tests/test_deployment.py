@@ -5,9 +5,11 @@ import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from egcf_processing import cli
 from egcf_processing.cli import main
+from egcf_processing.flux import chamber_geometry
 from egcf_processing.dashboard import clip_tables, deployment_label, list_processed_dirs, parse_window_time
-from egcf_processing.deployment import DEPLOYMENT_SCHEMA, clip, deployment_table, load_deployment
+from egcf_processing.deployment import DEPLOYMENT_SCHEMA, clip, deployment_table, load_deployment, resolve_processing
 from egcf_processing.pipeline import run
 
 DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "src" / "egcf_processing" / "dashboard.py"
@@ -230,3 +232,170 @@ def test_dashboard_lists_deployments_under_the_selected_directory(tmp_path):
     at.sidebar.text_input[0].set_value(str(tmp_path / "raw")).run(timeout=60)
     assert not at.exception
     assert "deployment" not in [s.key for s in at.sidebar.selectbox]
+
+
+PROCESSING_TOML = VALID_TOML + """
+[processing]
+chamber_volume_l = 25
+chamber_area_m2 = 0.25
+"""
+
+
+def test_load_deployment_processing_table(tmp_path):
+    assert load_deployment(_deployment_dir(tmp_path))["processing"] == {}
+    meta = load_deployment(_deployment_dir(tmp_path, PROCESSING_TOML, "with_processing"))
+    assert meta["processing"] == {"chamber_volume_l": 25.0, "chamber_area_m2": 0.25}
+
+
+@pytest.mark.parametrize(
+    "old, new, match",
+    [
+        ("chamber_area_m2 = 0.25", "chamber_area_m2 = 0", "positive"),
+        ("chamber_area_m2 = 0.25", "chamber_area = 0.25", r"unknown \[processing\] key"),
+        ("chamber_volume_l = 25", 'chamber_volume_l = "25"', "positive"),
+    ],
+)
+def test_load_deployment_rejects_bad_processing(tmp_path, old, new, match):
+    with pytest.raises(ValueError, match=match):
+        load_deployment(_deployment_dir(tmp_path, PROCESSING_TOML.replace(old, new)))
+
+
+def test_resolve_processing_precedence(tmp_path):
+    meta = load_deployment(_deployment_dir(tmp_path, VALID_TOML + "\n[processing]\nchamber_volume_l = 25\n"))
+    defaults = {"chamber_volume_l": 30.0, "chamber_area_m2": 0.30}
+    assert resolve_processing(meta, {}, defaults) == {
+        "chamber_volume_l": (25.0, "deployment.toml"),
+        "chamber_area_m2": (0.30, "default"),
+    }
+    assert resolve_processing(meta, {"chamber_volume_l": 10, "chamber_area_m2": None}, defaults)["chamber_volume_l"] == (
+        10.0,
+        "argument",
+    )
+    assert resolve_processing(None, {}, defaults)["chamber_volume_l"] == (30.0, "default")
+
+
+def test_cli_geometry_from_toml_unless_flag_given(tmp_path, monkeypatch):
+    raw_dir = _deployment_dir(tmp_path, PROCESSING_TOML)
+    seen = {}
+    monkeypatch.setattr(cli, "run", lambda *args, **kwargs: seen.update(kwargs))
+    main([str(raw_dir), "--out-dir", str(tmp_path / "out")])
+    assert (seen["chamber_volume_l"], seen["chamber_area_m2"]) == (25.0, 0.25)
+    main([str(raw_dir), "--out-dir", str(tmp_path / "out"), "--chamber-area-m2", "0.5"])
+    assert (seen["chamber_volume_l"], seen["chamber_area_m2"]) == (25.0, 0.5)
+
+
+def test_pipeline_records_processing_parameters_used(tmp_path):
+    raw_dir = _deployment_dir(tmp_path, PROCESSING_TOML)
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(RAW)
+    run(raw_dir, tmp_path / "out", 4.0, 0.06, settle_offset_s=0)
+    processing = pl.read_parquet(tmp_path / "out" / "processing.parquet")
+    assert processing.to_dicts() == [
+        {
+            "deployment_id": "2026-01-01_hadley",
+            "chamber_volume_l": 4.0,
+            "chamber_area_m2": 0.06,
+            "chamber_height_m": pytest.approx(4.0 / 0.06 / 1000),
+            "chamber_geometry_from": "volume",
+        }
+    ]
+
+
+def test_dashboard_geometry_defaults_to_the_runs_recorded_values(tmp_path):
+    root = tmp_path / "processed"
+    for name, volume in [("a_site", 4.0), ("b_site", 8.0)]:
+        raw_dir = _deployment_dir(tmp_path, name=name)
+        (raw_dir / "gems_2026-01-01-00-00.txt").write_text(RAW)
+        run(raw_dir, root / name, volume, 0.06, settle_offset_s=0)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(root)).run(timeout=60)
+    assert not at.exception
+    assert at.sidebar.number_input(key="chamber_volume_l").value == 8.0  # b_site sorts first
+    assert at.sidebar.number_input(key="chamber_area_m2").value == 0.06
+
+    at.sidebar.number_input(key="chamber_volume_l").set_value(5.0).run(timeout=60)
+    assert at.sidebar.number_input(key="chamber_volume_l").value == 5.0
+
+    at.sidebar.selectbox(key="deployment").set_value("a_site — Hadley Harbor").run(timeout=60)
+    assert not at.exception
+    assert at.sidebar.number_input(key="chamber_volume_l").value == 4.0
+
+
+def test_chamber_geometry_from_volume_or_height():
+    from_volume = chamber_geometry(0.30, chamber_volume_l=30.0)
+    assert from_volume["chamber_height_m"] == pytest.approx(0.1)
+    from_height = chamber_geometry(0.30, chamber_height_m=0.1)
+    assert from_height["chamber_volume_l"] == pytest.approx(30.0)
+    for kwargs in ({}, {"chamber_volume_l": 30.0, "chamber_height_m": 0.1}):
+        with pytest.raises(ValueError, match="exactly one"):
+            chamber_geometry(0.30, **kwargs)
+    with pytest.raises(ValueError, match="chamber_height_m must be positive"):
+        chamber_geometry(0.30, chamber_height_m=0)
+
+
+def test_flux_from_height_matches_equivalent_volume(tmp_path):
+    # Flux depends only on V/A: 4 L over 0.06 m2 is the same chamber as 1/15 m of water over any area.
+    raw = "\n".join(
+        [
+            "V:2026-01-01T00:00:00Z,C1,Re",
+            "P:2026-01-01T00:00:01Z,2026-01-01T00:00:01Z,12.0,32.0,8.0,8.1",
+            "V:2026-01-01T00:01:00Z,C1,Fl",
+            "V:2026-01-01T00:02:00Z,C1,Re",
+            "P:2026-01-01T00:02:01Z,2026-01-01T00:02:01Z,12.0,32.0,7.0,8.1",
+            "V:2026-01-01T00:03:00Z,C2,Fl",
+        ]
+    )
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(raw)
+    run(raw_dir, tmp_path / "by_volume", 4.0, 0.06, settle_offset_s=0)
+    run(raw_dir, tmp_path / "by_height", None, 0.5, settle_offset_s=0, chamber_height_m=4.0 / 0.06 / 1000)
+
+    def o2(out):
+        fluxes = pl.read_parquet(tmp_path / out / "egcf_fluxes.parquet")
+        return fluxes.filter(pl.col("variable") == "oxygen")["output_value"].to_list()
+
+    # -0.5 mg/L/min / 32 mg/mmol * 60 min/h = -0.9375 mmol/L/h, times V/A = 4/0.06 L/m2 = -62.5.
+    assert o2("by_volume") == pytest.approx([-62.5])
+    assert o2("by_height") == pytest.approx(o2("by_volume"))
+
+
+def test_processing_height_resolution_and_record(tmp_path, monkeypatch):
+    toml = VALID_TOML + "\n[processing]\nchamber_height_m = 0.1\nchamber_area_m2 = 0.2\n"
+    raw_dir = _deployment_dir(tmp_path, toml)
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(RAW)
+    main([str(raw_dir), "--out-dir", str(tmp_path / "out"), "--settle-offset-s", "0"])
+    processing = pl.read_parquet(tmp_path / "out" / "processing.parquet").row(0, named=True)
+    assert processing["chamber_geometry_from"] == "height"
+    assert processing["chamber_volume_l"] == pytest.approx(20.0)
+
+    # A volume flag beats the toml's height rather than leaving both set.
+    seen = {}
+    monkeypatch.setattr(cli, "run", lambda *args, **kwargs: seen.update(kwargs))
+    main([str(raw_dir), "--out-dir", str(tmp_path / "out"), "--chamber-volume-l", "12"])
+    assert (seen["chamber_volume_l"], seen["chamber_height_m"], seen["chamber_area_m2"]) == (12.0, None, 0.2)
+
+    with pytest.raises(SystemExit):
+        main([str(raw_dir), "--chamber-volume-l", "12", "--chamber-height-m", "0.1"])
+    with pytest.raises(ValueError, match="only one of"):
+        load_deployment(_deployment_dir(tmp_path, toml + "chamber_volume_l = 20\n", "both"))
+
+
+def test_dashboard_geometry_height_mode(tmp_path):
+    raw_dir = _deployment_dir(tmp_path, VALID_TOML + "\n[processing]\nchamber_height_m = 0.1\nchamber_area_m2 = 0.2\n")
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text(RAW)
+    run(raw_dir, tmp_path / "out", None, 0.2, settle_offset_s=0, chamber_height_m=0.1)
+
+    at = AppTest.from_file(str(DASHBOARD_PATH))
+    at.run(timeout=60)
+    at.sidebar.text_input[0].set_value(str(tmp_path / "out")).run(timeout=60)
+    assert not at.exception
+    assert at.sidebar.radio(key="chamber_geometry_from").value == "Height (m)"
+    assert at.sidebar.number_input(key="chamber_height_m").value == 0.1
+    assert "Volume: 20.000 L" in " ".join(c.value for c in at.sidebar.caption)
+
+    at.sidebar.number_input(key="chamber_height_m").set_value(0.2).run(timeout=60)
+    at.sidebar.radio(key="chamber_geometry_from").set_value("Volume (L)").run(timeout=60)
+    assert not at.exception
+    assert at.sidebar.number_input(key="chamber_volume_l").value == pytest.approx(40.0)

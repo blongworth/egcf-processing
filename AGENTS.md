@@ -105,6 +105,20 @@ copied into each; the window trims it.
   other tables join `deployment.parquet` on `deployment_id` instead.
 - `out_dir` also gets `deployment.parquet` (one row, `DEPLOYMENT_SCHEMA`) and a verbatim copy of
   `deployment.toml`, so processed output is self-describing.
+- **`[processing]` table** (optional): currently only chamber geometry -- `chamber_area_m2` plus
+  one of `chamber_volume_l` or `chamber_height_m` (positive numbers; unknown keys, or both volume
+  and height, are an error). `resolve_processing` applies precedence CLI flag > toml > code default
+  per `PROCESSING_GROUPS`, so volume and height are one quantity: `--chamber-height-m` beats a toml
+  `chamber_volume_l` rather than leaving both set. The CLI logs each value with its source, which
+  is why the geometry flags default to None in argparse (`--chamber-volume-l` and
+  `--chamber-height-m` are mutually exclusive). `pipeline.run()` itself takes the geometry as
+  explicit arguments (`chamber_volume_l` may be None when `chamber_height_m` is given) and does not
+  read `[processing]`; it completes it with `flux.chamber_geometry` and records volume, area,
+  height and `chamber_geometry_from` (`volume`/`height`) in `processing.parquet` (one row,
+  `PROCESSING_SCHEMA`). The dashboard's geometry
+  inputs reset to `processing.parquet` (else the toml, else defaults) whenever the loaded
+  directory changes, and otherwise keep the user's edits. To add a parameter, extend
+  `PROCESSING_SCHEMA`, the CLI resolution, and `saved_geometry`-style dashboard defaults.
 - CLI: with a toml and no `--out-dir`, output goes to `data/processed/<deployment_id>`; the window
   is logged and `test = true` is a WARNING. `--par-start`/`--par-end` remain a separate PAR-only
   read-time cut.
@@ -206,6 +220,14 @@ its base. They default to the EGFC chamber's **30 L** and **0.30 m²**
 positional params with no default. They're the same for C1 and C2 per the project owner. Setting
 either sidebar input to `0.0` suppresses the flux table with a prompt rather than computing a
 divide-by-zero.
+
+`V / A` is the chamber's mean water height, so geometry can be given as a height instead of a
+volume: `V[L] / A[m²] = h[m] × 1000 L m⁻³` (`flux.chamber_geometry`, which takes the area plus
+exactly one of the two and fills in the other). Height assumes vertical walls; for a domed or
+sloped lid, measure the volume, and the reported height is then the effective mean height. Flux
+itself is unchanged -- `compute_fluxes` still takes `V` and `A`, with `V` derived from `h` when
+needed. The dashboard sidebar has a "Chamber size given as" Volume/Height toggle; switching carries
+the current value across (`_convert_geometry_input`) and the caption shows the derived quantity.
 
 Reported in **mmol m⁻² h⁻¹** — still per hour, not the literature's more common mmol m⁻² d⁻¹
 convention; only the molar-prefix scale changed from an earlier µmol m⁻² h⁻¹ convention. Sign is

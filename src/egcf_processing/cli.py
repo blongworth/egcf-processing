@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OUT_ROOT = Path("data/processed")
 
-from egcf_processing.deployment import load_deployment
+from egcf_processing.deployment import load_deployment, resolve_processing
 from egcf_processing.pipeline import (
     DEFAULT_CHAMBER_AREA_M2,
     DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
@@ -52,17 +52,27 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_OUTPUT_FORMAT,
         help="Output file format for all written tables",
     )
-    parser.add_argument(
+    depth = parser.add_mutually_exclusive_group()
+    depth.add_argument(
         "--chamber-volume-l",
         type=float,
-        default=DEFAULT_CHAMBER_VOLUME_L,
-        help="Chamber enclosed water volume in liters (same for C1 and C2), used to scale flux",
+        default=None,
+        help="Chamber enclosed water volume in liters (same for C1 and C2), used to scale flux; overrides "
+        f"[processing] in deployment.toml (default {DEFAULT_CHAMBER_VOLUME_L:g})",
+    )
+    depth.add_argument(
+        "--chamber-height-m",
+        type=float,
+        default=None,
+        help="Mean water height inside the chamber in m, instead of --chamber-volume-l (volume = height * area); "
+        "overrides [processing] in deployment.toml",
     )
     parser.add_argument(
         "--chamber-area-m2",
         type=float,
-        default=DEFAULT_CHAMBER_AREA_M2,
-        help="Sediment footprint area enclosed by the chamber base in m^2 (same for C1 and C2)",
+        default=None,
+        help="Sediment footprint area enclosed by the chamber base in m^2 (same for C1 and C2); overrides "
+        f"[processing] in deployment.toml (default {DEFAULT_CHAMBER_AREA_M2:g})",
     )
     parser.add_argument(
         "--partial-pressure-sensitivity",
@@ -166,11 +176,23 @@ def main(argv: list[str] | None = None) -> None:
         )
         if meta["test"]:
             logger.warning("*** %s is a TEST deployment (test = true) ***", meta["deployment_id"])
+    processing = resolve_processing(
+        meta,
+        {
+            "chamber_volume_l": args.chamber_volume_l,
+            "chamber_height_m": args.chamber_height_m,
+            "chamber_area_m2": args.chamber_area_m2,
+        },
+        {"chamber_volume_l": DEFAULT_CHAMBER_VOLUME_L, "chamber_area_m2": DEFAULT_CHAMBER_AREA_M2},
+    )
+    for key, (value, source) in processing.items():
+        logger.info("%s = %g (from %s)", key, value, source)
     run(
         args.raw_dir,
         out_dir,
-        chamber_volume_l=args.chamber_volume_l,
-        chamber_area_m2=args.chamber_area_m2,
+        chamber_volume_l=processing.get("chamber_volume_l", (None,))[0],
+        chamber_height_m=processing.get("chamber_height_m", (None,))[0],
+        chamber_area_m2=processing["chamber_area_m2"][0],
         settle_offset_s=args.settle_offset_s,
         output_format=args.format,
         partial_pressure_sensitivity_a_per_torr=args.partial_pressure_sensitivity,

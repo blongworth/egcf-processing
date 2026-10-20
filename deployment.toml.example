@@ -12,3 +12,12 @@ c2 = "sediment"
 comments = """
 Free text: weather, divers, anomalies, what was tested.
 """
+
+# Optional: processing parameters for this deployment. A CLI flag overrides these;
+# omitted keys fall back to the code defaults. The values actually used are
+# recorded in processed/<deployment_id>/processing.parquet.
+# Give the area plus ONE of volume or height: flux scales with V/A, the mean water height.
+[processing]
+chamber_area_m2 = 0.30   # sediment footprint per chamber, m^2 (same for C1 and C2)
+chamber_volume_l = 30.0  # enclosed water volume per chamber, liters
+# chamber_height_m = 0.10  # or: mean water height inside the chamber, m (assumes vertical walls)

@@ -51,7 +51,7 @@ def _tag(df: pl.DataFrame, meta: dict | None) -> pl.DataFrame:
 def run(
     raw_dir: Path,
     out_dir: Path,
-    chamber_volume_l: float,
+    chamber_volume_l: float | None,
     chamber_area_m2: float,
     settle_offset_s: float = DEFAULT_SETTLE_OFFSET_S,
     output_format: str = DEFAULT_OUTPUT_FORMAT,
@@ -68,10 +68,22 @@ def run(
     min_par_coverage: float = DEFAULT_MIN_PAR_COVERAGE,
     metabolism_min_r2: float = DEFAULT_METABOLISM_MIN_R2,
     chamber_par_transmittance: float = DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
+    chamber_height_m: float | None = None,
 ) -> dict:
+    """Run every layer. Chamber geometry is the area plus exactly one of volume or height."""
+    geometry = flux.chamber_geometry(chamber_area_m2, chamber_volume_l, chamber_height_m)
+    chamber_volume_l = geometry["chamber_volume_l"]
+    logger.info(
+        "chamber geometry: %g L over %g m2 = %g m mean water height (V/A)",
+        chamber_volume_l,
+        chamber_area_m2,
+        geometry["chamber_height_m"],
+    )
     meta = deployment.load_deployment(raw_dir)
     if meta is not None:
         combine.write_df(deployment.deployment_table(meta), out_dir, "deployment", output_format)
+        used = {**geometry, "chamber_geometry_from": "volume" if chamber_height_m is None else "height"}
+        combine.write_df(deployment.processing_table(meta, used), out_dir, "processing", output_format)
         shutil.copyfile(raw_dir / deployment.DEPLOYMENT_FILENAME, out_dir / deployment.DEPLOYMENT_FILENAME)
 
     files = discovery.find_all_files(raw_dir)

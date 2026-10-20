@@ -26,7 +26,7 @@ from egcf_processing.aggregate import (
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
 from egcf_processing.deployment import clip, load_deployment
 from egcf_processing.cycles import chamber_cycle_windows, experiment_spans
-from egcf_processing.flux import attach_experiment_par, compute_fluxes, linear_fit
+from egcf_processing.flux import L_PER_M3, attach_experiment_par, compute_fluxes, linear_fit
 from egcf_processing.hobo import AMBIENT_LOCATION
 from egcf_processing.metabolism import DEFAULT_CHAMBER_PAR_TRANSMITTANCE, classify_o2_fluxes, fit_pi_curves, jassby_platt
 from egcf_processing.par import PAR_SCHEMA
@@ -135,6 +135,60 @@ def list_processed_dirs(root: Path, show_test: bool = False) -> list[tuple[Path,
             continue
         found.append((path, meta))
     return found
+
+
+GEOMETRY_FROM_VOLUME = "Volume (L)"
+GEOMETRY_FROM_HEIGHT = "Height (m)"
+
+
+def _default_geometry() -> dict:
+    return {
+        "chamber_geometry_from": GEOMETRY_FROM_VOLUME,
+        "chamber_volume_l": DEFAULT_CHAMBER_VOLUME_L,
+        "chamber_area_m2": DEFAULT_CHAMBER_AREA_M2,
+        "chamber_height_m": DEFAULT_CHAMBER_VOLUME_L / DEFAULT_CHAMBER_AREA_M2 / L_PER_M3,
+    }
+
+
+def _convert_geometry_input() -> None:
+    """On a volume/height mode switch, carry the current value over instead of resetting it."""
+    state = st.session_state
+    area = state.get("chamber_area_m2", 0.0)
+    if area <= 0:
+        return
+    if state["chamber_geometry_from"] == GEOMETRY_FROM_HEIGHT and "chamber_volume_l" in state:
+        state["chamber_height_m"] = state["chamber_volume_l"] / area / L_PER_M3
+    elif state["chamber_geometry_from"] == GEOMETRY_FROM_VOLUME and "chamber_height_m" in state:
+        state["chamber_volume_l"] = state["chamber_height_m"] * area * L_PER_M3
+
+
+def saved_geometry(data_dir: Path) -> dict:
+    """Sidebar geometry state: the run's processing table, else the toml's [processing], else the defaults.
+
+    Volume and height are both filled in (one derived from the other) so
+    switching the input mode starts from a consistent value.
+    """
+    geometry = _default_geometry()
+    given = {}
+    meta = load_deployment(data_dir)
+    if meta is not None:
+        given = dict(meta["processing"])
+    processing = load_table(data_dir, "processing")
+    if processing is not None and processing.height:
+        row = processing.row(0, named=True)
+        given = {"chamber_area_m2": row["chamber_area_m2"]}
+        key = "chamber_height_m" if row.get("chamber_geometry_from") == "height" else "chamber_volume_l"
+        given[key] = row[key]
+    area = given.get("chamber_area_m2", geometry["chamber_area_m2"])
+    geometry["chamber_area_m2"] = area
+    if "chamber_height_m" in given:
+        geometry["chamber_geometry_from"] = GEOMETRY_FROM_HEIGHT
+        geometry["chamber_height_m"] = given["chamber_height_m"]
+        geometry["chamber_volume_l"] = given["chamber_height_m"] * area * L_PER_M3
+    else:
+        geometry["chamber_volume_l"] = given.get("chamber_volume_l", geometry["chamber_volume_l"])
+        geometry["chamber_height_m"] = geometry["chamber_volume_l"] / area / L_PER_M3
+    return geometry
 
 
 def deployment_label(path: Path, meta: dict | None) -> str:
@@ -1974,16 +2028,44 @@ def main() -> None:
     )
 
     st.sidebar.header("Chamber geometry")
-    chamber_volume_l = st.sidebar.number_input(
-        "Chamber volume (L)", value=DEFAULT_CHAMBER_VOLUME_L, min_value=0.0, format="%.3f", key="chamber_volume_l"
+    # Reset to the run's recorded geometry whenever the loaded directory changes,
+    # then leave the inputs alone so a user edit survives reruns.
+    # The saved copy also refills an input Streamlit dropped while the other mode was showing.
+    if st.session_state.get("_geometry_dir") != str(data_dir):
+        saved = saved_geometry(data_dir) if data_dir is not None else _default_geometry()
+        st.session_state["_geometry_saved"] = saved
+        st.session_state.update(saved)
+        st.session_state["_geometry_dir"] = str(data_dir)
+    for key, value in st.session_state["_geometry_saved"].items():
+        st.session_state.setdefault(key, value)
+    geometry_from = st.sidebar.radio(
+        "Chamber size given as",
+        [GEOMETRY_FROM_VOLUME, GEOMETRY_FROM_HEIGHT],
+        horizontal=True,
+        key="chamber_geometry_from",
+        on_change=_convert_geometry_input,
+        help="Flux scales with volume / area, the mean water height, so either one plus the area is enough. "
+        "Height assumes vertical walls.",
     )
+    if geometry_from == GEOMETRY_FROM_HEIGHT:
+        chamber_height_m = st.sidebar.number_input(
+            "Mean water height (m)", min_value=0.0, format="%.4f", key="chamber_height_m"
+        )
+    else:
+        chamber_volume_l = st.sidebar.number_input(
+            "Chamber volume (L)", min_value=0.0, format="%.3f", key="chamber_volume_l"
+        )
     chamber_area_m2 = st.sidebar.number_input(
         "Sediment footprint area (m^2)",
-        value=DEFAULT_CHAMBER_AREA_M2,
         min_value=0.0,
         format="%.4f",
         key="chamber_area_m2",
     )
+    if geometry_from == GEOMETRY_FROM_HEIGHT:
+        chamber_volume_l = chamber_height_m * chamber_area_m2 * L_PER_M3
+        st.sidebar.caption(f"Volume: {chamber_volume_l:.3f} L")
+    elif chamber_area_m2 > 0:
+        st.sidebar.caption(f"Mean water height: {chamber_volume_l / chamber_area_m2 / L_PER_M3:.4f} m")
 
     if data_dir is None:
         st.error(source_error)

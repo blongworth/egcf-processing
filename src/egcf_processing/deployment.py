@@ -35,8 +35,20 @@ DEPLOYMENT_SCHEMA = {
     "comments": pl.Utf8,
 }
 
+PROCESSING_SCHEMA = {
+    "deployment_id": pl.Utf8,
+    "chamber_volume_l": pl.Float64,
+    "chamber_area_m2": pl.Float64,
+    "chamber_height_m": pl.Float64,
+    "chamber_geometry_from": pl.Utf8,
+}
+
+# Each group is one quantity: a source (argument, toml, default) supplies at most one key per group.
+PROCESSING_GROUPS = (("chamber_area_m2",), ("chamber_volume_l", "chamber_height_m"))
+PROCESSING_KEYS = [k for group in PROCESSING_GROUPS for k in group]
+
 _REQUIRED = ("site", "start", "c1", "c2", "test")
-_ALLOWED = ("site", "lat", "lon", "start", "end", "test", "c1", "c2", "comments")
+_ALLOWED = ("site", "lat", "lon", "start", "end", "test", "c1", "c2", "comments", "processing")
 
 
 def _to_naive_utc(value, key: str, path: Path) -> datetime:
@@ -69,6 +81,8 @@ def parse_deployment(raw: dict, deployment_id: str, path: Path) -> dict:
     if "comments" in raw and not isinstance(raw["comments"], str):
         raise ValueError(f"{path}: comments must be a string")
 
+    processing = _parse_processing(raw.get("processing", {}), path)
+
     start = _to_naive_utc(raw["start"], "start", path)
     end = _to_naive_utc(raw["end"], "end", path) if "end" in raw else None
     if end is not None and end <= start:
@@ -85,7 +99,45 @@ def parse_deployment(raw: dict, deployment_id: str, path: Path) -> dict:
         "c1": raw["c1"],
         "c2": raw["c2"],
         "comments": raw.get("comments"),
+        "processing": processing,
     }
+
+
+def _parse_processing(raw, path: Path) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: processing must be a [processing] table")
+    unknown = sorted(set(raw) - set(PROCESSING_KEYS))
+    if unknown:
+        raise ValueError(f"{path}: unknown [processing] key(s) {unknown}; allowed: {PROCESSING_KEYS}")
+    for key, value in raw.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{path}: [processing] {key} must be a positive number, got {value!r}")
+    for group in PROCESSING_GROUPS:
+        given = [k for k in group if k in raw]
+        if len(given) > 1:
+            raise ValueError(f"{path}: [processing] give only one of {given}")
+    return {k: float(v) for k, v in raw.items()}
+
+
+def resolve_processing(meta: dict | None, overrides: dict, defaults: dict) -> dict[str, tuple[float, str]]:
+    """Each processing parameter's value and where it came from: argument > deployment.toml > default.
+
+    Resolved per group, so e.g. --chamber-height-m beats a toml chamber_volume_l
+    rather than leaving both set; the result has one key per group. An override
+    of None means "not given"; defaults must supply one key per group.
+    """
+    from_toml = meta["processing"] if meta is not None else {}
+    given = {k: v for k, v in overrides.items() if v is not None}
+    resolved = {}
+    for group in PROCESSING_GROUPS:
+        for values, source in ((given, "argument"), (from_toml, DEPLOYMENT_FILENAME), (defaults, "default")):
+            hits = [k for k in group if k in values]
+            if len(hits) > 1:
+                raise ValueError(f"give only one of {hits} ({source})")
+            if hits:
+                resolved[hits[0]] = (float(values[hits[0]]), source)
+                break
+    return resolved
 
 
 def load_deployment(raw_dir: Path) -> dict | None:
@@ -100,6 +152,11 @@ def load_deployment(raw_dir: Path) -> dict | None:
 
 def deployment_table(meta: dict) -> pl.DataFrame:
     return pl.DataFrame([{k: meta[k] for k in DEPLOYMENT_SCHEMA}], schema=DEPLOYMENT_SCHEMA)
+
+
+def processing_table(meta: dict, values: dict) -> pl.DataFrame:
+    """One row recording the processing parameters a run actually used (given and derived)."""
+    return pl.DataFrame([{"deployment_id": meta["deployment_id"], **values}], schema=PROCESSING_SCHEMA)
 
 
 def clip(df: pl.DataFrame, meta: dict | None, ts_col: str = "ts") -> pl.DataFrame:
