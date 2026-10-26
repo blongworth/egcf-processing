@@ -15,6 +15,7 @@ wheels/
 !/data/processed/
 /data/processed/*
 !/data/processed/egcf_*/
+!/data/processed/egcf_*/deployment.toml
 !/data/processed/egcf_*/status.parquet
 !/data/processed/egcf_*/system_health.parquet
 !/data/processed/egcf_*/rga.parquet
