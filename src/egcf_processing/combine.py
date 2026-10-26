@@ -87,16 +87,16 @@ def duration_cols_to_seconds(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def write_df(df: pl.DataFrame, out_dir: Path, name: str, output_format: str = "parquet") -> Path:
-    """Write a table to out_dir/{name}.{ext} in the given format ("parquet" or "csv").
+    """Write a table to out_dir/{name}.{ext} in the given format ("parquet", "csv" or "both").
 
     The parquet output keeps the native Duration dtype; only the CSV output
-    goes through duration_cols_to_seconds.
+    goes through duration_cols_to_seconds. "both" returns the parquet path.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    if output_format == "csv":
+    if output_format in ("csv", "both"):
         path = out_dir / f"{name}.csv"
         duration_cols_to_seconds(df).write_csv(path)
-    else:
+    if output_format != "csv":
         path = out_dir / f"{name}.parquet"
         df.write_parquet(path)
     return path

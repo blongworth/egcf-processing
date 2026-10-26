@@ -1,0 +1,24 @@
+# Copy to data/raw/<deployment_id>/deployment.toml -- the folder name is the deployment_id.
+# Layer A is written untrimmed; Layers B-E and the dashboard are trimmed to [start, end).
+
+site = "Hadley Harbor"
+lat = 41.5145            # optional, decimal degrees, WGS84
+lon = -70.6990           # optional
+start = 2026-10-01T14:00:00Z   # in-water window start; must carry Z or a +hh:mm offset
+end   = 2026-10-08T12:00:00Z   # optional: omit for an ongoing deployment
+test  = false            # true hides it in the dashboard unless "Show test deployments" is ticked
+c1 = "grass"             # grass | sediment | none
+c2 = "sediment"
+comments = """
+Free text: weather, divers, anomalies, what was tested.
+"""
+
+# Optional: processing parameters for this deployment. Any key from egcf.toml's
+# [chamber], [cycles], [rga], [par] or [metabolism] sections may go here.
+# A CLI flag overrides these; omitted keys fall back to egcf.toml, then the code defaults. The values actually used are
+# recorded in processed/<deployment_id>/processing.parquet.
+# Give the area plus ONE of volume or height: flux scales with V/A, the mean water height.
+[processing]
+chamber_area_m2 = 0.30   # sediment footprint per chamber, m^2 (same for C1 and C2)
+chamber_volume_l = 30.0  # enclosed water volume per chamber, liters
+# chamber_height_m = 0.10  # or: mean water height inside the chamber, m (assumes vertical walls)

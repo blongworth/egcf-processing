@@ -17,6 +17,9 @@ heating from internal electronics vs. tracking ambient tide), not a flux.
 Sign convention: a rising concentration (efflux, sediment -> water) is
 positive; a falling one (uptake into sediment, e.g. O2 consumption/SOD) is
 negative -- reported signed, never forced positive.
+
+V / A is the chamber's mean water height, so the geometry can be given as a
+volume or a height (see chamber_geometry): V[L] / A[m^2] = h[m] * 1000 L m^-3.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ from __future__ import annotations
 import math
 
 import polars as pl
+
+L_PER_M3 = 1000.0
 
 O2_MMOL_PER_MG = (
     1 / 1000 * 1 / 32 * 1000
@@ -357,6 +362,35 @@ def _with_n2_dissolved_umol_l(
     return joined.with_columns(pl.Series("_n2_umol_l", values, dtype=pl.Float64)).drop(
         "_t0", "_s0"
     )
+
+
+def chamber_geometry(
+    chamber_area_m2: float, chamber_volume_l: float | None = None, chamber_height_m: float | None = None
+) -> dict[str, float]:
+    """Complete a chamber's (volume, area, height) from its area plus exactly one of volume or height.
+
+    Flux only depends on V/A, the mean water height over the footprint, so a
+    measured height is enough without a volume: V = h * A * 1000 L m^-3. That
+    assumes vertical walls; for a domed or sloped lid, measure the volume and
+    the height reported back is then the effective (mean) height V/A.
+    """
+    if (chamber_volume_l is None) == (chamber_height_m is None):
+        raise ValueError("give exactly one of chamber_volume_l or chamber_height_m")
+    if chamber_area_m2 <= 0:
+        raise ValueError("chamber_area_m2 must be positive")
+    if chamber_height_m is not None:
+        if chamber_height_m <= 0:
+            raise ValueError("chamber_height_m must be positive")
+        chamber_volume_l = chamber_height_m * chamber_area_m2 * L_PER_M3
+    elif chamber_volume_l <= 0:
+        raise ValueError("chamber_volume_l must be positive")
+    else:
+        chamber_height_m = chamber_volume_l / chamber_area_m2 / L_PER_M3
+    return {
+        "chamber_volume_l": chamber_volume_l,
+        "chamber_area_m2": chamber_area_m2,
+        "chamber_height_m": chamber_height_m,
+    }
 
 
 def compute_fluxes(

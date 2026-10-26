@@ -6,7 +6,7 @@ can be unit tested directly; only the render_*/main functions touch `st`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -23,9 +23,11 @@ from egcf_processing.aggregate import (
     aggregate_onto_windows,
     match_readings_to_windows,
 )
+from egcf_processing.config import load_config
 from egcf_processing.combine import RGA_SCHEMA, SCALUP_SCHEMA, STATUS_SCHEMA, duration_cols_to_seconds
+from egcf_processing.deployment import clip, load_deployment
 from egcf_processing.cycles import chamber_cycle_windows, experiment_spans
-from egcf_processing.flux import attach_experiment_par, compute_fluxes, linear_fit
+from egcf_processing.flux import L_PER_M3, attach_experiment_par, compute_fluxes, linear_fit
 from egcf_processing.hobo import AMBIENT_LOCATION
 from egcf_processing.metabolism import DEFAULT_CHAMBER_PAR_TRANSMITTANCE, classify_o2_fluxes, fit_pi_curves, jassby_platt
 from egcf_processing.par import PAR_SCHEMA
@@ -46,6 +48,8 @@ TABLE_NAMES = [
     "egcf_metabolism",
     "egcf_pi_fit",
 ]
+
+DEFAULT_PROCESSED_ROOT = Path("data/processed")
 
 _MASS_COLOR_PALETTE = px.colors.qualitative.Plotly
 
@@ -92,6 +96,141 @@ def load_all(data_dir: Path) -> dict[str, pl.DataFrame | None]:
         if tables[name] is not None:
             tables[name] = with_elapsed_time_s(tables[name])
     return tables
+
+
+def load_processed_deployment(data_dir: Path) -> dict | None:
+    """Deployment meta from the deployment.toml the pipeline copied into data_dir, or None.
+
+    The id comes from deployment.parquet when present, since data_dir may have
+    been renamed or set with --out-dir.
+    """
+    meta = load_deployment(data_dir)
+    if meta is None:
+        return None
+    table = load_table(data_dir, "deployment")
+    if table is not None and "deployment_id" in table.columns and table.height:
+        meta["deployment_id"] = table["deployment_id"][0]
+    return meta
+
+
+def is_processed_dir(path: Path) -> bool:
+    """True if path itself holds pipeline output (deployment.parquet or any dashboard table).
+
+    A toml alone doesn't count -- raw deployment folders have one too. Legacy
+    output without a toml still counts (as a non-test deployment).
+    """
+    names = [*TABLE_NAMES, "deployment"]
+    return any((path / f"{name}.{ext}").exists() for name in names for ext in ("parquet", "csv"))
+
+
+def list_processed_dirs(root: Path, show_test: bool = False) -> list[tuple[Path, dict | None]]:
+    """Subfolders of root holding pipeline output, newest name first, test deployments hidden unless asked."""
+    if not root.is_dir():
+        return []
+    found = []
+    for path in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
+        if not is_processed_dir(path):
+            continue
+        meta = load_processed_deployment(path)
+        if meta is not None and meta["test"] and not show_test:
+            continue
+        found.append((path, meta))
+    return found
+
+
+GEOMETRY_FROM_VOLUME = "Volume (L)"
+GEOMETRY_FROM_HEIGHT = "Height (m)"
+
+
+_DEPTH_KEYS = ("chamber_volume_l", "chamber_height_m")
+
+
+def _overlay_geometry(given: dict, layer: dict) -> dict:
+    """given with layer's geometry on top; a layer's volume or height displaces the other."""
+    given = dict(given)
+    if any(k in layer for k in _DEPTH_KEYS):
+        for k in _DEPTH_KEYS:
+            given.pop(k, None)
+    given.update({k: layer[k] for k in ("chamber_area_m2", *_DEPTH_KEYS) if k in layer})
+    return given
+
+
+def _convert_geometry_input() -> None:
+    """On a volume/height mode switch, carry the current value over instead of resetting it."""
+    state = st.session_state
+    area = state.get("chamber_area_m2", 0.0)
+    if area <= 0:
+        return
+    if state["chamber_geometry_from"] == GEOMETRY_FROM_HEIGHT and "chamber_volume_l" in state:
+        state["chamber_height_m"] = state["chamber_volume_l"] / area / L_PER_M3
+    elif state["chamber_geometry_from"] == GEOMETRY_FROM_VOLUME and "chamber_height_m" in state:
+        state["chamber_volume_l"] = state["chamber_height_m"] * area * L_PER_M3
+
+
+def saved_geometry(data_dir: Path | None, settings: dict | None = None) -> dict:
+    """Sidebar geometry state: the run's processing table, else the toml's [processing], else egcf.toml, else
+    the code defaults.
+
+    Volume and height are both filled in (one derived from the other) so
+    switching the input mode starts from a consistent value.
+    """
+    geometry = {"chamber_geometry_from": GEOMETRY_FROM_VOLUME}
+    given = {"chamber_area_m2": DEFAULT_CHAMBER_AREA_M2, "chamber_volume_l": DEFAULT_CHAMBER_VOLUME_L}
+    given = _overlay_geometry(given, settings or {})
+    meta = load_deployment(data_dir) if data_dir is not None else None
+    if meta is not None:
+        given = _overlay_geometry(given, meta["processing"])
+    processing = load_table(data_dir, "processing") if data_dir is not None else None
+    if processing is not None and processing.height:
+        row = processing.row(0, named=True)
+        key = "chamber_height_m" if row.get("chamber_geometry_from") == "height" else "chamber_volume_l"
+        given = _overlay_geometry(given, {"chamber_area_m2": row["chamber_area_m2"], key: row[key]})
+    area = given["chamber_area_m2"]
+    geometry["chamber_area_m2"] = area
+    if "chamber_height_m" in given:
+        geometry["chamber_geometry_from"] = GEOMETRY_FROM_HEIGHT
+        geometry["chamber_height_m"] = given["chamber_height_m"]
+        geometry["chamber_volume_l"] = given["chamber_height_m"] * area * L_PER_M3
+    else:
+        geometry["chamber_volume_l"] = given["chamber_volume_l"]
+        geometry["chamber_height_m"] = geometry["chamber_volume_l"] / area / L_PER_M3
+    return geometry
+
+
+def deployment_label(path: Path, meta: dict | None) -> str:
+    if meta is None:
+        return f"{path.name} (no deployment.toml)"
+    label = f"{meta['deployment_id']} — {meta['site']}"
+    return f"{label} (TEST)" if meta["test"] else label
+
+
+def parse_window_time(text: str) -> datetime | None:
+    """ISO datetime -> naive UTC; a naive input is taken as UTC (the dashboard's display clock). Blank -> None."""
+    text = text.strip()
+    if not text:
+        return None
+    value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def clip_tables(
+    tables: dict[str, pl.DataFrame | None], start: datetime, end: datetime | None
+) -> dict[str, pl.DataFrame | None]:
+    """Trim every timestamped table to the deployment window [start, end).
+
+    Layer A/B/C use their own time column; fluxes and metabolism are trimmed
+    by experiment_start. Tables with no time column (egcf_pi_fit) pass through.
+    """
+    window = {"start": start, "end": end}
+    clipped = {}
+    for name, df in tables.items():
+        ts_col = None if df is None else table_ts_col(df)
+        if ts_col is None and df is not None and "experiment_start" in df.columns:
+            ts_col = "experiment_start"
+        clipped[name] = df if ts_col is None else clip(df, window, ts_col)
+    return clipped
 
 
 def table_ts_col(df: pl.DataFrame) -> str | None:
@@ -243,10 +382,11 @@ def render_time_range_control(bounds: tuple[datetime, datetime]) -> tuple[dateti
     st.header("Time range")
     st.caption("Applies to every tab. Rates and Fluxes and Metabolism keep the experiments that start in the range.")
     options = [*TIME_RANGE_PRESETS, CUSTOM_TIME_RANGE]
+    default = load_config().get("time_range_preset", DEFAULT_TIME_RANGE_PRESET)
     preset = st.selectbox(
         "Preset",
         options,
-        index=options.index(DEFAULT_TIME_RANGE_PRESET),
+        index=options.index(default if default in options else DEFAULT_TIME_RANGE_PRESET),
         key="time_range_preset",
         on_change=_seed_custom_time_range,
     )
@@ -1098,7 +1238,8 @@ DEFAULT_EXPERIMENT_VARIABLE = "oxygen_mgL"
 
 def _experiment_variable_select(options: list[str]) -> str:
     """The Variable selectbox both grains share, defaulting to oxygen when it's offered."""
-    index = options.index(DEFAULT_EXPERIMENT_VARIABLE) if DEFAULT_EXPERIMENT_VARIABLE in options else 0
+    default = load_config().get("experiment_variable", DEFAULT_EXPERIMENT_VARIABLE)
+    index = options.index(default) if default in options else 0
     return st.selectbox("Variable", options, index=index, key="experiment_variable")
 
 
@@ -1803,23 +1944,94 @@ def render_overview(tables: dict[str, pl.DataFrame | None]) -> None:
             st.write(f"**{name}**: {df.height} rows{time_range}")
 
 
+def render_deployment_header(meta: dict) -> None:
+    if meta["test"]:
+        st.warning(f"TEST deployment: {meta['deployment_id']}")
+    position = ""
+    if meta["lat"] is not None and meta["lon"] is not None:
+        position = f" ({meta['lat']:.5f}, {meta['lon']:.5f})"
+    end = meta["end"] or "ongoing"
+    st.markdown(
+        f"**{meta['deployment_id']}** — {meta['site']}{position}  \n"
+        f"C1: **{meta['c1']}** · C2: **{meta['c2']}** · in water {meta['start']} → {end} UTC"
+    )
+    if meta["comments"]:
+        with st.expander("Deployment notes"):
+            st.text(meta["comments"].strip())
+
+
+def render_window_control(meta: dict, slot) -> tuple[datetime, datetime | None] | None:
+    """Start/end inputs defaulting to the toml window; the result trims every table.
+
+    Keyed per deployment so switching deployments resets to that one's toml.
+    Returns None (no trimming) if an input doesn't parse.
+    """
+    with slot:
+        st.subheader("Deployment window (UTC)")
+        start_text = st.text_input(
+            "Window start", value=meta["start"].isoformat(), key=f"window_start_{meta['deployment_id']}"
+        )
+        end_text = st.text_input(
+            "Window end",
+            value=meta["end"].isoformat() if meta["end"] is not None else "",
+            key=f"window_end_{meta['deployment_id']}",
+            help="Blank for an open-ended (ongoing) deployment.",
+        )
+        try:
+            start = parse_window_time(start_text) or meta["start"]
+            end = parse_window_time(end_text)
+        except ValueError as e:
+            st.error(f"Unreadable window time, showing untrimmed data: {e}")
+            return None
+        if end is not None and end <= start:
+            st.error("Window end must be after start; showing untrimmed data.")
+            return None
+        return start, end
+
+
 def main() -> None:
     st.set_page_config(page_title="EGFC Dashboard", layout="wide")
     st.title("EGFC Lander Dashboard")
 
+    settings = load_config()
     st.sidebar.header("Data source")
-    data_dir_input = st.sidebar.text_input("Processed data directory", value="data/processed/surface")
+    data_dir_input = st.sidebar.text_input(
+        "Processed data directory",
+        value=str(settings.get("processed_root", DEFAULT_PROCESSED_ROOT)),
+        help="A folder of deployments (one subfolder each), or a single deployment's output folder.",
+    )
+    source_dir = Path(data_dir_input.strip())
+    data_dir = None
+    source_error = None
+    if not source_dir.exists():
+        source_error = f"Directory not found: {source_dir}"
+    elif is_processed_dir(source_dir) or not list_processed_dirs(source_dir, show_test=True):
+        data_dir = source_dir
+    else:
+        show_test = st.sidebar.checkbox(
+            "Show test deployments", value=settings.get("show_test_deployments", False), key="show_test_deployments"
+        )
+        candidates = list_processed_dirs(source_dir, show_test)
+        if candidates:
+            labels = [deployment_label(path, meta) for path, meta in candidates]
+            choice = st.sidebar.selectbox("Deployment", labels, key="deployment")
+            data_dir = candidates[labels.index(choice)][0]
+        else:
+            source_error = f"Only test deployments under {source_dir}/ -- tick 'Show test deployments'."
     if st.sidebar.button("Reload data"):
         st.cache_data.clear()
+    window_slot = st.sidebar.container()
     time_range_slot = st.sidebar.container()
     partial_pressure_sensitivity = st.sidebar.number_input(
         "Partial pressure sensitivity (A/Torr)",
-        value=DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+        value=settings.get(
+            "partial_pressure_sensitivity_a_per_torr", DEFAULT_PARTIAL_PRESSURE_SENSITIVITY_A_PER_TORR
+        ),
         format="%.2e",
     )
     total_pressure_sensitivity = st.sidebar.number_input(
         "Total pressure sensitivity (A/Torr)",
-        value=DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR,
+        value=settings.get("total_pressure_sensitivity_a_per_torr", DEFAULT_TOTAL_PRESSURE_SENSITIVITY_A_PER_TORR),
         format="%.2e",
     )
 
@@ -1828,29 +2040,62 @@ def main() -> None:
         "Settling time after valve switch (s)",
         min_value=0,
         max_value=300,
-        value=int(DEFAULT_SETTLE_OFFSET_S),
+        value=int(settings.get("settle_offset_s", DEFAULT_SETTLE_OFFSET_S)),
         key="settle_offset_s",
         help="Readings this soon after each valve switch are left out of cycle averages, fluxes and metabolism.",
     )
 
     st.sidebar.header("Chamber geometry")
-    chamber_volume_l = st.sidebar.number_input(
-        "Chamber volume (L)", value=DEFAULT_CHAMBER_VOLUME_L, min_value=0.0, format="%.3f", key="chamber_volume_l"
+    # Reset to the run's recorded geometry whenever the loaded directory changes,
+    # then leave the inputs alone so a user edit survives reruns.
+    # The saved copy also refills an input Streamlit dropped while the other mode was showing.
+    if st.session_state.get("_geometry_dir") != str(data_dir):
+        saved = saved_geometry(data_dir, settings)
+        st.session_state["_geometry_saved"] = saved
+        st.session_state.update(saved)
+        st.session_state["_geometry_dir"] = str(data_dir)
+    for key, value in st.session_state["_geometry_saved"].items():
+        st.session_state.setdefault(key, value)
+    geometry_from = st.sidebar.radio(
+        "Chamber size given as",
+        [GEOMETRY_FROM_VOLUME, GEOMETRY_FROM_HEIGHT],
+        horizontal=True,
+        key="chamber_geometry_from",
+        on_change=_convert_geometry_input,
+        help="Flux scales with volume / area, the mean water height, so either one plus the area is enough. "
+        "Height assumes vertical walls.",
     )
+    if geometry_from == GEOMETRY_FROM_HEIGHT:
+        chamber_height_m = st.sidebar.number_input(
+            "Mean water height (m)", min_value=0.0, format="%.4f", key="chamber_height_m"
+        )
+    else:
+        chamber_volume_l = st.sidebar.number_input(
+            "Chamber volume (L)", min_value=0.0, format="%.3f", key="chamber_volume_l"
+        )
     chamber_area_m2 = st.sidebar.number_input(
         "Sediment footprint area (m^2)",
-        value=DEFAULT_CHAMBER_AREA_M2,
         min_value=0.0,
         format="%.4f",
         key="chamber_area_m2",
     )
+    if geometry_from == GEOMETRY_FROM_HEIGHT:
+        chamber_volume_l = chamber_height_m * chamber_area_m2 * L_PER_M3
+        st.sidebar.caption(f"Volume: {chamber_volume_l:.3f} L")
+    elif chamber_area_m2 > 0:
+        st.sidebar.caption(f"Mean water height: {chamber_volume_l / chamber_area_m2 / L_PER_M3:.4f} m")
 
-    data_dir = Path(data_dir_input)
-    if not data_dir.exists():
-        st.error(f"Directory not found: {data_dir}")
+    if data_dir is None:
+        st.error(source_error)
         return
 
     tables = st.cache_data(load_all)(data_dir)
+    meta = load_processed_deployment(data_dir)
+    if meta is not None:
+        render_deployment_header(meta)
+        window = render_window_control(meta, window_slot)
+        if window is not None:
+            tables = clip_tables(tables, *window)
     render_overview(tables)
 
     plot_tables = tables

@@ -26,5 +26,8 @@ wheels/
 !/data/processed/surface/egcf_chamber_cycles.parquet
 !/data/processed/surface/egcf_pi_fit.parquet
 
+# Machine-specific settings overriding egcf.toml
+egcf.local.toml
+
 # OS cruft
 .DS_Store
