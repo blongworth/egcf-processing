@@ -1,0 +1,16 @@
+# Metadata for 2026-10-01 Hadley Harbor EGCF deployment.
+
+site = "Hadley Harbor 1"
+lat =  41.514359           # Approximate
+lon = -70.704184           #  Approximate
+start = 2026-10-01T16:52:56Z   # in-water window start; must carry Z or a +hh:mm offset
+end   = 2026-10-02T13:35:30Z   # optional: omit for an ongoing deployment
+test  = false            # true hides it in the dashboard unless "Show test deployments" is ticked
+c1 = "sediment"             # grass | sediment | none
+c2 = "grass"
+comments = """
+Deployed in sandy sediment in ~0.75m depth.
+Chambers eroded out of sediment.
+Chamber 2 (grass) fully out and lying on its side,
+the other was rocking and eroded around base.
+"""

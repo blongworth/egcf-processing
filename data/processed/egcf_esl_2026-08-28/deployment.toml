@@ -1,0 +1,11 @@
+site = "ESL"
+start = 2026-08-28T20:38:00Z   # in-water window start; must carry Z or a +hh:mm offset
+end   = 2026-08-29T21:30:00Z   # optional: omit for an ongoing deployment
+test  = true            # true hides it in the dashboard unless "Show test deployments" is ticked
+c1 = "none"             # grass | sediment | none
+c2 = "none"
+comments = """
+Test with original small valves. Lower flow rates (~60-100 mL/min).
+Closed chambers, one with bucket of sediment, one with water and algae.
+"""
+

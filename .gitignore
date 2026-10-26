@@ -14,17 +14,16 @@ wheels/
 /data/*
 !/data/processed/
 /data/processed/*
-!/data/processed/surface/
-/data/processed/surface/*
-!/data/processed/surface/status.parquet
-!/data/processed/surface/system_health.parquet
-!/data/processed/surface/rga.parquet
-!/data/processed/surface/scalup.parquet
-!/data/processed/surface/valve.parquet
-!/data/processed/surface/par.parquet
-!/data/processed/surface/hobo_oxygen.parquet
-!/data/processed/surface/egcf_chamber_cycles.parquet
-!/data/processed/surface/egcf_pi_fit.parquet
+!/data/processed/egcf_*/
+!/data/processed/egcf_*/status.parquet
+!/data/processed/egcf_*/system_health.parquet
+!/data/processed/egcf_*/rga.parquet
+!/data/processed/egcf_*/scalup.parquet
+!/data/processed/egcf_*/valve.parquet
+!/data/processed/egcf_*/par.parquet
+!/data/processed/egcf_*/hobo_oxygen.parquet
+!/data/processed/egcf_*/egcf_chamber_cycles.parquet
+!/data/processed/egcf_*/egcf_pi_fit.parquet
 
 # Machine-specific settings overriding egcf.toml
 egcf.local.toml

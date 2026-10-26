@@ -1,0 +1,18 @@
+# Metadata for 2026-10-13 Hadley Harbor EGCF deployment.
+
+site = "Hadley Harbor 2"
+lat =  41.514359           # optional, decimal degrees, WGS84
+lon = -70.704184           # optional
+start = 2026-10-13T20:42:50Z   # in-water window start; must carry Z or a +hh:mm offset
+end   = 2026-10-15T18:43:00Z   # optional: omit for an ongoing deployment
+test  = false            # true hides it in the dashboard unless "Show test deployments" is ticked
+c1 = "grass"             # grass | sediment | none
+c2 = "sediment"
+comments = """
+Deployed in muddy/sandy sediment in ~1m depth.
+Battery was not fully charged- 26V at deployment.
+Noted slight leakage from line to C1 when C2 selected.
+System shut down at 2026-10-14T17:36:44 due to voltage reaching 23V.
+Found grass chamber (C1) rocking- eroded away around base.
+Other chamber solid.
+"""
