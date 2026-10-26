@@ -5,7 +5,7 @@ import pytest
 
 from egcf_processing.combine import SYSTEM_HEALTH_SCHEMA
 from egcf_processing.par import PAR_SCHEMA
-from egcf_processing.pipeline import run
+from egcf_processing.pipeline import OUTPUT_TABLES, run
 
 # Placeholder chamber geometry -- exercises the flux arithmetic only, not real
 # EGFC dimensions.
@@ -268,3 +268,32 @@ def test_end_to_end_pipeline_without_par_writes_empty_typed_par(tmp_path):
 
     chamber_cycles = pl.read_parquet(out_dir / "egcf_chamber_cycles.parquet")
     assert chamber_cycles["par_umol_m2_s"].is_null().all()
+
+
+def test_rerun_clears_earlier_output_in_either_format(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "deployment.toml").write_text(
+        'site = "x"\nstart = 2026-01-01T00:00:00Z\ntest = false\nc1 = "grass"\nc2 = "sediment"\n'
+    )
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text("V:2026-01-01T00:00:00Z,C1,Re\nR:2026-01-01T00:00:01Z,2,10\n")
+    out_dir = tmp_path / "out"
+    run(raw_dir, out_dir, 4.0, 0.06, output_format="both")
+    written = {p.name for p in out_dir.iterdir()}
+    expected = {f"{n}.{ext}" for n in OUTPUT_TABLES for ext in ("parquet", "csv")} | {"deployment.toml"}
+    assert written == expected  # OUTPUT_TABLES lists exactly what run() writes
+
+    (out_dir / "notes.html").write_text("keep me")
+    (raw_dir / "deployment.toml").unlink()
+    run(raw_dir, out_dir, 4.0, 0.06, output_format="csv")
+    names = {p.name for p in out_dir.iterdir()}
+    assert "notes.html" in names
+    assert not any(n.endswith(".parquet") for n in names)
+    assert not {"deployment.toml", "deployment.csv", "processing.csv"} & names
+
+
+def test_run_refuses_out_dir_equal_to_raw_dir(tmp_path):
+    (tmp_path / "par.csv").write_text("not ours to delete")
+    with pytest.raises(ValueError, match="out_dir must differ"):
+        run(tmp_path, tmp_path, 4.0, 0.06)
+    assert (tmp_path / "par.csv").exists()

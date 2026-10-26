@@ -195,6 +195,27 @@ def load_deployment(raw_dir: Path) -> dict | None:
     return parse_deployment(raw, Path(raw_dir).resolve().name, path)
 
 
+def find_deployments(root: Path) -> list[Path]:
+    """Every folder at or below root holding a deployment.toml, sorted by path.
+
+    Folders without a toml (legacy layouts, loose PAR/HOBO folders) are not
+    deployments and are skipped. A deployment nested inside another, or two
+    folders with the same name (= deployment_id), is an error: discovery is
+    recursive, so the outer one would ingest the inner one's files, and equal
+    ids would write to the same output folder.
+    """
+    found = sorted(path.parent for path in Path(root).rglob(DEPLOYMENT_FILENAME))
+    for outer in found:
+        nested = [p for p in found if p != outer and outer in p.parents]
+        if nested:
+            raise ValueError(f"deployment {outer} contains other deployment(s) {nested}; move them out")
+    names = [p.name for p in found]
+    duplicated = sorted({n for n in names if names.count(n) > 1})
+    if duplicated:
+        raise ValueError(f"deployment id(s) {duplicated} used by more than one folder under {root}")
+    return found
+
+
 def deployment_table(meta: dict) -> pl.DataFrame:
     return pl.DataFrame([{k: meta[k] for k in DEPLOYMENT_SCHEMA}], schema=DEPLOYMENT_SCHEMA)
 

@@ -22,7 +22,7 @@ CONFIG_FILENAME = "egcf.toml"
 LOCAL_CONFIG_FILENAME = "egcf.local.toml"
 CONFIG_ENV_VAR = "EGCF_CONFIG"
 
-OUTPUT_FORMATS = ("parquet", "csv")
+OUTPUT_FORMATS = ("parquet", "csv", "both")
 
 SECTIONS = {
     "paths": ("raw_root", "processed_root", "par_calibrations"),

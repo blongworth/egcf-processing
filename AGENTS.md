@@ -106,6 +106,12 @@ copied into each; the window trims it.
   other tables join `deployment.parquet` on `deployment_id` instead.
 - `out_dir` also gets `deployment.parquet` (one row, `DEPLOYMENT_SCHEMA`) and a verbatim copy of
   `deployment.toml`, so processed output is self-describing.
+- **Re-runs clear their own old output first** (`pipeline.clear_outputs`): every
+  `OUTPUT_TABLES` name in either format plus the `deployment.toml` copy is deleted from `out_dir`
+  before writing, so a format switch or a removed toml can't leave stale files that the dashboard
+  (parquet first) would show. Other files in `out_dir` (HTML reports etc.) are left alone.
+  `run()` refuses `out_dir == raw_dir`. If you add an output table, add it to `OUTPUT_TABLES`
+  (`test_rerun_clears_earlier_output_in_either_format` checks the list matches what is written).
 - **`[processing]` table** (optional): any numeric processing setting (`PROCESSING_KEYS`, the
   same names as in `egcf.toml`'s `[chamber]`..`[metabolism]` sections and as `pipeline.run()`'s
   kwargs) -- chamber geometry (`chamber_area_m2` plus one of `chamber_volume_l` or
@@ -156,7 +162,15 @@ copied into each; the window trims it.
 - The code `DEFAULT_*` constants remain the final fallback; `tests/test_config.py` asserts the
   checked-in `egcf.toml` equals them, so change both together.
 - CLI: `raw_dir` may be a bare deployment id, resolved under `raw_root` when it isn't an existing
-  path. `--format` and `--par-calibrations` fall back to the config, then the code default.
+  path. If it's omitted, every folder with a `deployment.toml` below `raw_root`
+  (`deployment.find_deployments`) is processed separately, each to
+  `<processed_root>/<deployment_id>`. Folders without a toml (legacy `lander/`, `surface/`, loose
+  `PAR/`, `hobo_oxygen/`) are skipped: they may hold copies of deployment files, and processing them
+  would duplicate or merge data. A deployment nested inside another (discovery is recursive, so the
+  outer would ingest the inner's files) or two folders with the same id (same output folder) is an
+  error, as is `--out-dir` without a raw_dir. `--format` and
+  `--par-calibrations` fall back to the config, then the code default. `--format both` (or
+  `output_format = "both"`) writes every table as both parquet and csv (`combine.write_df`).
 - Dashboard: reads the config each rerun for the data-directory default, the test-deployment
   checkbox, the sensitivity/settling starting values, geometry (below the deployment layers), the
   time-range preset and the experiment variable (an unknown preset/variable falls back silently).
@@ -873,7 +887,7 @@ shows when only scalup or rga data exists. It only reports; nothing is dropped o
 uv sync                 # install deps (polars, pytest dev group, streamlit, plotly)
 uv run pytest -q        # run the test suite
 uv run main.py <raw_dir> --out-dir <out_dir> [--chamber-volume-l 30] [--chamber-area-m2 0.30] \
-    [--settle-offset-s 60] [--format parquet|csv]
+    [--settle-offset-s 60] [--format parquet|csv|both]
 uv run streamlit run dashboard.py   # launch the dashboard
 ```
 

@@ -54,6 +54,39 @@ PROCESSING_DEFAULTS = {
     "chamber_par_transmittance": DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
 }
 
+# Every table run() writes, so a re-run can clear its own earlier output (in either format) first.
+OUTPUT_TABLES = (
+    "status",
+    "rga",
+    "scalup",
+    "valve",
+    "system_health",
+    "par",
+    "par_daily",
+    "hobo_oxygen",
+    "egcf_rga_scans",
+    "egcf_chamber_cycles",
+    "egcf_fluxes",
+    "egcf_metabolism",
+    "egcf_pi_fit",
+    "deployment",
+    "processing",
+)
+
+
+def clear_outputs(out_dir: Path) -> list[Path]:
+    """Delete this pipeline's outputs from an earlier run of out_dir; any other file is left alone.
+
+    Without this a format switch leaves the other format's files behind, and the
+    dashboard (parquet first) would show the stale ones; so would a deployment.toml
+    copy after its raw toml was removed.
+    """
+    names = [f"{name}.{ext}" for name in OUTPUT_TABLES for ext in ("parquet", "csv")]
+    stale = [out_dir / name for name in [*names, deployment.DEPLOYMENT_FILENAME] if (out_dir / name).is_file()]
+    for path in stale:
+        path.unlink()
+    return stale
+
 
 def _tag(df: pl.DataFrame, meta: dict | None) -> pl.DataFrame:
     """Prefix a literal deployment_id column so concatenated deployments stay unambiguous."""
@@ -93,7 +126,12 @@ def run(
         chamber_area_m2,
         geometry["chamber_height_m"],
     )
+    if Path(out_dir).resolve() == Path(raw_dir).resolve():
+        raise ValueError(f"out_dir must differ from raw_dir ({raw_dir}): clearing old output would touch raw files")
     meta = deployment.load_deployment(raw_dir)
+    stale = clear_outputs(Path(out_dir))
+    if stale:
+        logger.info("removed %d output file(s) from an earlier run of %s", len(stale), out_dir)
     if meta is not None:
         combine.write_df(deployment.deployment_table(meta), out_dir, "deployment", output_format)
         used = {

@@ -5,7 +5,7 @@ import pytest
 
 from egcf_processing import cli
 from egcf_processing.cli import main
-from egcf_processing.config import CONFIG_ENV_VAR, SECTIONS, load_config
+from egcf_processing.config import CONFIG_ENV_VAR, SECTIONS, _read, load_config
 from egcf_processing.dashboard import DEFAULT_EXPERIMENT_VARIABLE, DEFAULT_PROCESSED_ROOT, DEFAULT_TIME_RANGE_PRESET
 from egcf_processing.deployment import PROCESSING_KEYS
 from egcf_processing.pipeline import DEFAULT_OUTPUT_FORMAT, DEFAULT_PAR_CALIBRATIONS_PATH, PROCESSING_DEFAULTS
@@ -36,7 +36,7 @@ def test_every_processing_key_has_a_section():
 
 
 def test_repo_config_matches_code_defaults():
-    settings = load_config(REPO_CONFIG)
+    settings = _read(REPO_CONFIG)  # not load_config: a developer's egcf.local.toml must not count
     root = REPO_CONFIG.parent
     assert settings.pop("raw_root") == (root / cli.DEFAULT_RAW_ROOT).resolve()
     assert settings.pop("processed_root") == (root / DEFAULT_PROCESSED_ROOT).resolve()
@@ -121,3 +121,53 @@ def test_cli_precedence_flag_over_deployment_over_config_over_default(tmp_path, 
 
     main(["2026-01-01_hadley", "--settle-offset-s", "5"])
     assert seen["settle_offset_s"] == 5.0
+
+
+def _raw_root(tmp_path, monkeypatch, deployments):
+    raw_root = tmp_path / "raw"
+    for rel in deployments:
+        (raw_root / rel).mkdir(parents=True)
+        _write(raw_root / rel / "deployment.toml", DEPLOYMENT_TOML)
+    (raw_root / "surface" / "legacy").mkdir(parents=True)
+    config = _write(tmp_path / "egcf.toml", '[paths]\nraw_root = "raw"\nprocessed_root = "out"\n')
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config))
+    return raw_root
+
+
+def test_cli_without_raw_dir_processes_each_deployment_below_raw_root(tmp_path, monkeypatch):
+    raw_root = _raw_root(tmp_path, monkeypatch, ["a_site", "2026/b_site"])
+    calls = []
+    monkeypatch.setattr(cli, "run", lambda *args, **kwargs: calls.append(args))
+    main([])
+    out = (tmp_path / "out").resolve()
+    assert calls == [
+        ((raw_root / "2026" / "b_site").resolve(), out / "b_site"),
+        ((raw_root / "a_site").resolve(), out / "a_site"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "deployments, argv, match",
+    [
+        ([], [], "no deployment.toml found"),
+        (["a_site", "a_site/inner"], [], "contains other deployment"),
+        (["x/a_site", "y/a_site"], [], "more than one folder"),
+        (["a_site"], ["--out-dir", "elsewhere"], "--out-dir needs an explicit raw_dir"),
+    ],
+)
+def test_cli_without_raw_dir_errors(tmp_path, monkeypatch, capsys, deployments, argv, match):
+    _raw_root(tmp_path, monkeypatch, deployments)
+    monkeypatch.setattr(cli, "run", lambda *args, **kwargs: pytest.fail("run should not be called"))
+    with pytest.raises(SystemExit):
+        main(argv)
+    assert match in capsys.readouterr().err
+
+
+def test_format_both_writes_parquet_and_csv(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "gems_2026-01-01-00-00.txt").write_text("V:2026-01-01T00:00:00Z,C1,Re\nR:2026-01-01T00:00:01Z,2,10\n")
+    out = tmp_path / "out"
+    main([str(raw_dir), "--out-dir", str(out), "--format", "both"])
+    for name in ("rga", "valve", "egcf_chamber_cycles", "egcf_fluxes"):
+        assert (out / f"{name}.parquet").exists() and (out / f"{name}.csv").exists()

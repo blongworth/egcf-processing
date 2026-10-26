@@ -11,7 +11,7 @@ DEFAULT_RAW_ROOT = Path("data/raw")
 DEFAULT_OUT_ROOT = Path("data/processed")
 
 from egcf_processing.config import CONFIG_FILENAME, load_config
-from egcf_processing.deployment import load_deployment, resolve_processing
+from egcf_processing.deployment import find_deployments, load_deployment, resolve_processing
 from egcf_processing.pipeline import (
     DEFAULT_CHAMBER_AREA_M2,
     DEFAULT_CHAMBER_PAR_TRANSMITTANCE,
@@ -52,8 +52,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "raw_dir",
         type=Path,
+        nargs="?",
+        default=None,
         help="Deployment directory (gems/surface logs, PAR, HOBO, optional deployment.toml), or a deployment id "
-        "under raw_root from egcf.toml (default data/raw)",
+        "under raw_root from egcf.toml (default data/raw). Omit it to process every folder with a "
+        "deployment.toml below raw_root, each to <processed_root>/<deployment_id>",
     )
     parser.add_argument(
         "--config",
@@ -76,9 +79,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--format",
-        choices=["parquet", "csv"],
+        choices=["parquet", "csv", "both"],
         default=None,
-        help=f"Output file format for all written tables (default {DEFAULT_OUTPUT_FORMAT})",
+        help=f"Output file format for all written tables; both writes parquet and csv (default {DEFAULT_OUTPUT_FORMAT})",
     )
     depth = parser.add_mutually_exclusive_group()
     depth.add_argument(
@@ -195,13 +198,31 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     settings = load_config(args.config)
-    raw_dir = args.raw_dir
     raw_root = settings.get("raw_root", DEFAULT_RAW_ROOT)
-    if not raw_dir.exists() and (raw_root / raw_dir).is_dir():
-        raw_dir = raw_root / raw_dir
+    raw_dir = args.raw_dir
+    if raw_dir is not None:
+        if not raw_dir.exists() and (raw_root / raw_dir).is_dir():
+            raw_dir = raw_root / raw_dir
+        _process(raw_dir, args.out_dir, args, settings)
+        return
+    if args.out_dir is not None:
+        parser.error("--out-dir needs an explicit raw_dir; without one each deployment goes to its own folder")
+    if not Path(raw_root).is_dir():
+        parser.error(f"no raw_dir given and raw_root {raw_root} does not exist")
+    try:
+        raw_dirs = find_deployments(raw_root)
+    except ValueError as e:
+        parser.error(str(e))
+    if not raw_dirs:
+        parser.error(f"no raw_dir given and no deployment.toml found below raw_root {raw_root}")
+    logger.info("processing %d deployment(s) below %s", len(raw_dirs), raw_root)
+    for raw_dir in raw_dirs:
+        _process(raw_dir, None, args, settings)
+
+
+def _process(raw_dir: Path, out_dir: Path | None, args: argparse.Namespace, settings: dict) -> None:
     out_root = settings.get("processed_root", DEFAULT_OUT_ROOT)
     meta = load_deployment(raw_dir)
-    out_dir = args.out_dir
     if meta is None:
         out_dir = out_dir or out_root
         logger.info("no deployment.toml in %s: processing everything, untrimmed", raw_dir)

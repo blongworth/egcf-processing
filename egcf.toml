@@ -11,12 +11,12 @@
 # Relative paths are relative to this file. Delete a line to use the code default.
 
 [paths]
-raw_root = "data/raw"                # `uv run main.py <deployment_id>` looks here
+raw_root = "data/raw"                # `uv run main.py <deployment_id>` looks here; bare `uv run main.py` processes every deployment in it
 processed_root = "data/processed"    # output goes to processed_root/<deployment_id>; the dashboard lists it
 par_calibrations = "src/egcf_processing/par_calibrations.csv"
 
 [output]
-output_format = "parquet"            # parquet | csv
+output_format = "parquet"            # parquet | csv | both
 
 [chamber]
 chamber_area_m2 = 0.30               # sediment footprint per chamber, m^2 (C1 and C2)

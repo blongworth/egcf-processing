@@ -22,8 +22,8 @@ uv sync                            # install deps
 uv run pytest -q                   # run the full test suite
 uv run pytest tests/test_cycles.py # run a single test file
 uv run pytest tests/test_cycles.py::test_name  # run a single test
-uv run main.py <raw_dir | deployment_id> [--config egcf.toml] [--out-dir <out_dir>] [--chamber-volume-l 30 | --chamber-height-m 0.1] [--chamber-area-m2 0.30] \
-    [--settle-offset-s 60] [--format parquet|csv] \
+uv run main.py [<raw_dir | deployment_id>] [--config egcf.toml] [--out-dir <out_dir>] [--chamber-volume-l 30 | --chamber-height-m 0.1] [--chamber-area-m2 0.30] \
+    [--settle-offset-s 60] [--format parquet|csv|both] \
     [--par-dir <dir>] [--par-calibrations <csv>] [--par-time-offset-h 0] [--par-start <iso>] [--par-end <iso>] \
     [--dark-par-threshold 20] [--min-par-coverage 0.9] [--metabolism-min-r2 0] \
     [--chamber-par-transmittance 1.0]
