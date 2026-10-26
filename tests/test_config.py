@@ -171,3 +171,45 @@ def test_format_both_writes_parquet_and_csv(tmp_path):
     main([str(raw_dir), "--out-dir", str(out), "--format", "both"])
     for name in ("rga", "valve", "egcf_chamber_cycles", "egcf_fluxes"):
         assert (out / f"{name}.parquet").exists() and (out / f"{name}.csv").exists()
+
+
+BAD_DATE_TOML = DEPLOYMENT_TOML.replace("start = 2026-01-01T00:00:00Z", "start = 2026-1-01T00:00:00Z")
+
+
+def test_toml_syntax_error_names_file_line_and_hint(tmp_path):
+    raw_dir = tmp_path / "dep"
+    raw_dir.mkdir()
+    _write(raw_dir / "deployment.toml", BAD_DATE_TOML)
+    with pytest.raises(ValueError) as e:
+        cli.load_deployment(raw_dir)
+    message = str(e.value)
+    assert str(raw_dir / "deployment.toml") in message
+    assert "3 | start = 2026-1-01T00:00:00Z" in message
+    assert "zero-padded" in message
+
+
+def test_config_syntax_error_names_file(tmp_path):
+    path = _write(tmp_path / "egcf.toml", "[chamber\n")
+    with pytest.raises(ValueError, match="egcf.toml: invalid TOML"):
+        load_config(path)
+
+
+def test_cli_reports_every_bad_toml_before_processing(tmp_path, monkeypatch, capsys):
+    raw_root = _raw_root(tmp_path, monkeypatch, ["a_site", "b_site", "c_site"])
+    _write(raw_root / "a_site" / "deployment.toml", BAD_DATE_TOML)
+    _write(raw_root / "c_site" / "deployment.toml", DEPLOYMENT_TOML.replace('c1 = "grass"', 'c1 = "eelgrass"'))
+    monkeypatch.setattr(cli, "run", lambda *args, **kwargs: pytest.fail("run should not be called"))
+    with pytest.raises(SystemExit):
+        main([])
+    err = capsys.readouterr().err
+    assert "2 deployment.toml file(s) need fixing" in err
+    assert "a_site" in err and "c_site" in err and "b_site" not in err
+    assert "Traceback" not in err
+
+
+def test_cli_single_raw_dir_bad_toml_is_a_clean_error(tmp_path, monkeypatch, capsys):
+    raw_root = _raw_root(tmp_path, monkeypatch, ["a_site"])
+    _write(raw_root / "a_site" / "deployment.toml", BAD_DATE_TOML)
+    with pytest.raises(SystemExit):
+        main(["a_site"])
+    assert "zero-padded" in capsys.readouterr().err

@@ -197,12 +197,16 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
-    settings = load_config(args.config)
+    try:
+        settings = load_config(args.config)
+    except (ValueError, FileNotFoundError) as e:
+        parser.error(str(e))
     raw_root = settings.get("raw_root", DEFAULT_RAW_ROOT)
     raw_dir = args.raw_dir
     if raw_dir is not None:
         if not raw_dir.exists() and (raw_root / raw_dir).is_dir():
             raw_dir = raw_root / raw_dir
+        _check_deployments(parser, [raw_dir])
         _process(raw_dir, args.out_dir, args, settings)
         return
     if args.out_dir is not None:
@@ -215,9 +219,22 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(e))
     if not raw_dirs:
         parser.error(f"no raw_dir given and no deployment.toml found below raw_root {raw_root}")
+    _check_deployments(parser, raw_dirs)
     logger.info("processing %d deployment(s) below %s", len(raw_dirs), raw_root)
     for raw_dir in raw_dirs:
         _process(raw_dir, None, args, settings)
+
+
+def _check_deployments(parser: argparse.ArgumentParser, raw_dirs: list[Path]) -> None:
+    """Validate every deployment.toml before anything is written, reporting all bad ones at once."""
+    errors = []
+    for raw_dir in raw_dirs:
+        try:
+            load_deployment(raw_dir)
+        except ValueError as e:
+            errors.append(str(e))
+    if errors:
+        parser.error(f"{len(errors)} deployment.toml file(s) need fixing:\n" + "\n".join(errors))
 
 
 def _process(raw_dir: Path, out_dir: Path | None, args: argparse.Namespace, settings: dict) -> None:

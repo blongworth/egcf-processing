@@ -13,10 +13,9 @@ code default. Relative paths resolve against the config file's folder.
 from __future__ import annotations
 
 import os
-import tomllib
 from pathlib import Path
 
-from egcf_processing.deployment import PROCESSING_GROUPS, check_processing_value
+from egcf_processing.deployment import PROCESSING_GROUPS, check_processing_value, read_toml
 
 CONFIG_FILENAME = "egcf.toml"
 LOCAL_CONFIG_FILENAME = "egcf.local.toml"
@@ -91,8 +90,7 @@ def parse_config(raw: dict, path: Path) -> dict:
 
 
 def _read(path: Path) -> dict:
-    with path.open("rb") as f:
-        return parse_config(tomllib.load(f), path)
+    return parse_config(read_toml(path), path)
 
 
 def load_config(path: Path | None = None) -> dict:

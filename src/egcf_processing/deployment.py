@@ -12,6 +12,7 @@ every other timestamp in the pipeline.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,9 @@ from pathlib import Path
 import polars as pl
 
 DEPLOYMENT_FILENAME = "deployment.toml"
+
+_TOML_POSITION = re.compile(r"at line (\d+), column (\d+)")
+_UNPADDED_DATE = re.compile(r"\b\d{4}-(\d-|\d{2}-\d\b)")
 
 CONDITIONS = ("grass", "sediment", "none")
 
@@ -79,6 +83,24 @@ _POSITIVE_KEYS = (
 
 _REQUIRED = ("site", "start", "c1", "c2", "test")
 _ALLOWED = ("site", "lat", "lon", "start", "end", "test", "c1", "c2", "comments", "processing")
+
+
+def read_toml(path: Path) -> dict:
+    """tomllib.loads, but a syntax error names the file and points at the offending line."""
+    text = path.read_text(encoding="utf-8")
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        message = f"{path}: invalid TOML: {e}"
+        position = _TOML_POSITION.search(str(e))
+        lines = text.splitlines()
+        if position and int(position[1]) <= len(lines):
+            line, column = int(position[1]), int(position[2])
+            source = lines[line - 1]
+            message += f"\n  {line} | {source}\n  {' ' * len(str(line))} | {' ' * (column - 1)}^"
+            if _UNPADDED_DATE.search(source):
+                message += "\n  hint: dates must be zero-padded, e.g. 2026-08-29T21:30:00Z"
+        raise ValueError(message) from None
 
 
 def _to_naive_utc(value, key: str, path: Path) -> datetime:
@@ -190,9 +212,7 @@ def load_deployment(raw_dir: Path) -> dict | None:
     path = Path(raw_dir) / DEPLOYMENT_FILENAME
     if not path.exists():
         return None
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
-    return parse_deployment(raw, Path(raw_dir).resolve().name, path)
+    return parse_deployment(read_toml(path), Path(raw_dir).resolve().name, path)
 
 
 def find_deployments(root: Path) -> list[Path]:
