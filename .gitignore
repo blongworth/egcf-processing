@@ -17,3 +17,8 @@ egcf.local.toml
 
 # OS cruft
 .DS_Store
+
+# Rendered report output (contains data)
+reports/_output/
+reports/*_files/
+reports/.quarto/

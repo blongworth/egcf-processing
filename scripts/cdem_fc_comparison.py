@@ -272,10 +272,10 @@ def _add_stable_shading(fig: go.Figure, df: pl.DataFrame) -> None:
         fig.add_vrect(x0=start, x1=end, fillcolor=_DETECTOR_COLORS[det], opacity=0.08, line_width=0)
 
 
-def plot_timeseries(
-    df: pl.DataFrame, events: pl.DataFrame, out: Path,
+def fig_timeseries(
+    df: pl.DataFrame, events: pl.DataFrame,
     value_col: str = "amps", y_title: str = "ion current (A)", title: str = "RGA ion current by mass",
-) -> None:
+) -> go.Figure:
     masses = sorted(df["mass"].unique().to_list())
     ncols = 3
     nrows = -(-len(masses) // ncols)
@@ -303,14 +303,21 @@ def plot_timeseries(
         title=f"{title}: FC vs CDEM (dotted: EMON/EMOFF/AON/AOFF; shaded: analysis windows)",
         height=300 * nrows, template="plotly_white",
     )
-    fig.write_html(out)
+    return fig
 
 
-def plot_by_detector(
+def plot_timeseries(
     df: pl.DataFrame, events: pl.DataFrame, out: Path,
+    value_col: str = "amps", y_title: str = "ion current (A)", title: str = "RGA ion current by mass",
+) -> None:
+    fig_timeseries(df, events, value_col, y_title, title).write_html(out)
+
+
+def fig_by_detector(
+    df: pl.DataFrame,
     value_col: str = "amps", y_title: str = "ion current (A)", title: str = "RGA ion current",
     total_pressure: pl.DataFrame | None = None,
-) -> None:
+) -> go.Figure:
     fig = make_subplots(rows=1, cols=2, subplot_titles=["FC", "CDEM"], horizontal_spacing=0.08)
     if total_pressure is not None:
         fig.add_trace(
@@ -336,10 +343,18 @@ def plot_by_detector(
     fig.update_layout(
         title=f"{title}, all masses, per detector run (shaded: analysis windows)", height=550, template="plotly_white"
     )
-    fig.write_html(out)
+    return fig
 
 
-def plot_gain(gains: pl.DataFrame, out: Path) -> None:
+def plot_by_detector(
+    df: pl.DataFrame, events: pl.DataFrame, out: Path,
+    value_col: str = "amps", y_title: str = "ion current (A)", title: str = "RGA ion current",
+    total_pressure: pl.DataFrame | None = None,
+) -> None:
+    fig_by_detector(df, value_col, y_title, title, total_pressure).write_html(out)
+
+
+def fig_gain(gains: pl.DataFrame) -> go.Figure:
     fig = go.Figure(
         go.Scatter(
             x=gains["mass"], y=gains["cdem_fc_gain"], mode="markers+lines",
@@ -352,10 +367,14 @@ def plot_gain(gains: pl.DataFrame, out: Path) -> None:
         xaxis_title="m/z", yaxis_title="CDEM / FC current ratio", template="plotly_white",
     )
     fig.update_xaxes(tickmode="array", tickvals=gains["mass"].to_list())
-    fig.write_html(out)
+    return fig
 
 
-def plot_relative_error(stats: pl.DataFrame, out: Path) -> None:
+def plot_gain(gains: pl.DataFrame, out: Path) -> None:
+    fig_gain(gains).write_html(out)
+
+
+def fig_relative_error(stats: pl.DataFrame) -> go.Figure:
     metrics = {
         "noise_mad_rsd_pct": "scan-to-scan noise RSD, MAD-based (%)",
         "noise_rsd_pct": "scan-to-scan noise RSD, SD-based (%)",
@@ -378,7 +397,11 @@ def plot_relative_error(stats: pl.DataFrame, out: Path) -> None:
     fig.update_layout(
         title="Relative error by mass: FC vs CDEM", barmode="group", height=1100, template="plotly_white"
     )
-    fig.write_html(out)
+    return fig
+
+
+def plot_relative_error(stats: pl.DataFrame, out: Path) -> None:
+    fig_relative_error(stats).write_html(out)
 
 
 def main(argv: list[str] | None = None) -> None:

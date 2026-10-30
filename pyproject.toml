@@ -20,6 +20,10 @@ egcf-process = "egcf_processing.cli:main"
 dev = [
     "pytest>=8.0",
 ]
+report = [
+    "jupyter>=1.1.1",
+    "kaleido>=1.5.0",
+]
 
 [build-system]
 requires = ["hatchling"]

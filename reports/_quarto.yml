@@ -1,0 +1,25 @@
+project:
+  output-dir: _output
+
+execute:
+  echo: false
+  warning: false
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    page-layout: full
+  typst:
+    toc: true
+    toc-depth: 2
+    section-numbering: "1.1"
+    papersize: us-letter
+    margin:
+      x: 0.8in
+      y: 0.8in
+    fontsize: 10pt
+    include-in-header:
+      - text: |
+          #show figure: set block(breakable: true)

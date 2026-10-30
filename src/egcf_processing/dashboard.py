@@ -768,9 +768,20 @@ def _render_linked_timeseries(
     ``chamber_spans`` (see active_chamber_spans) shades the background by
     which chamber was being sampled at that time, on every subplot.
     """
+    fig = build_linked_figure(sections, title, chamber_spans)
+    if fig is not None:
+        st.plotly_chart(fig, width="stretch")
+
+
+def build_linked_figure(
+    sections: list[tuple[str, list[go.Scatter], bool, bool] | tuple[str, list[go.Scatter], bool, bool, bool]],
+    title: str,
+    chamber_spans: pl.DataFrame | None = None,
+) -> go.Figure | None:
+    """The figure _render_linked_timeseries draws, or None when no section has traces."""
     sections = [(*s, False)[:5] for s in sections if s[1]]
     if not sections:
-        return
+        return None
     fig = make_subplots(rows=len(sections), cols=1, shared_xaxes=True, subplot_titles=[label for label, *_ in sections])
     for i, (_label, traces, sci, log_y, zero_line) in enumerate(sections, start=1):
         for trace in traces:
@@ -785,7 +796,7 @@ def _render_linked_timeseries(
     if chamber_spans is not None and not chamber_spans.is_empty():
         _shade_chamber_spans(fig, chamber_spans)
     fig.update_layout(height=250 * len(sections), title=title)
-    st.plotly_chart(fig, width="stretch")
+    return fig
 
 
 _SYSTEM_HEALTH_PANELS = [

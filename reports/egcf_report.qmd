@@ -1,0 +1,528 @@
+---
+title: "Eelgrass benthic flux chamber (EGCF): 2026 instrument tests and deployments"
+author: "TODO"
+date: today
+---
+
+```{python}
+#| label: setup
+import sys
+from pathlib import Path
+
+import plotly.io as pio
+
+sys.path.insert(0, str(Path.cwd()))
+import report_figs as rf
+
+pio.templates.default = "plotly_white"
+show, show_all = rf.show, rf.show_all
+
+
+ESL = ["egcf_esl_2026-08-25", "egcf_esl_2026-08-28", "egcf_esl_2026-09-18", "egcf_esl_2026-09-23"]
+HADLEY = ["egcf_hadley_2026-10-01", "egcf_hadley_2026-10-13"]
+D = {dep: rf.load_deployment(dep) for dep in ESL + HADLEY}
+LABELS = {
+    "egcf_esl_2026-08-25": "ESL 08-25<br>small valves",
+    "egcf_esl_2026-08-28": "ESL 08-28<br>small valves",
+    "egcf_esl_2026-09-18": "ESL 09-18<br>large valves",
+    "egcf_esl_2026-09-23": "ESL 09-23<br>large valves",
+    "egcf_hadley_2026-10-01": "Hadley 10-01<br>field, eroded",
+    "egcf_hadley_2026-10-13": "Hadley 10-13<br>field, battery cut",
+}
+```
+
+# Summary
+
+TODO: one paragraph on what was tested, what worked, and the headline numbers (turbo setpoint chosen,
+CDEM vs FC decision, valve size, first field fluxes).
+
+# System and methods
+
+TODO: lander, chambers (C1/C2), sample line, RGA + SCALUP, valve cycle (sealed incubation, sampled
+alternately, flushed between experiments).
+
+Processing is the `egcf-processing` pipeline, in five layers:
+
+1. **Layer A**: raw SD-card and surface-telemetry logs parsed into status, RGA, SCALUP, valve,
+   system-health, PAR and HOBO tables.
+2. **Layer B**: one row per RGA mass-scan cycle.
+3. **Layer C**: one row per chamber measurement cycle, averaged from cycle start + settle offset to
+   the next valve transition.
+4. **Layer D**: benthic flux per experiment, chamber and variable, `dC/dt × V/A` from a linear fit to
+   Layer C.
+5. **Layer E**: O₂ fluxes classed light/dark by PAR, with R, NCP and GPP and a per-chamber
+   Jassby–Platt P–I fit.
+
+TODO: anything specific to the flux sign convention, N₂ from N₂/Ar, H⁺ from pH.
+
+All figures and tables below are read from the saved pipeline output, so numbers match the settings
+recorded in `processing.parquet`. Timeseries are averaged for display where stated in the caption.
+
+## Deployments
+
+```{python}
+#| output: asis
+print(rf.md_table(rf.deployments_table(list(D.values()))))
+```
+
+## Processing settings
+
+```{python}
+#| output: asis
+print(rf.md_table(rf.processing_table(list(D.values()))))
+```
+
+TODO: note that chamber geometry is nominal (30 L over 0.30 m²) for every deployment.
+
+# Instrument tests
+
+## Turbo pump speed
+
+TODO: aim of the test, setpoints stepped, duration, sample.
+
+```{python}
+T = rf.load_turbo()
+SETTLE_MIN = T["settle_s"] / 60
+```
+
+```{python}
+#| output: asis
+print(
+    f"Readings within {SETTLE_MIN:g} min of acquisition restarting after each speed change are excluded "
+    "from all statistics (settle period, inferred from the saved `in_settle` flag). Statistics are "
+    "recomputed from the saved tagged readings with `scripts/turbo_speed_analysis.py`."
+)
+```
+
+::: {.content-visible when-format="html"}
+```{python}
+tsa = rf.tsa
+show((rf.style(tsa.fig_timeseries(T["turbo_tagged"], T["speed_changes"], T["settle_s"]), None, 700),
+      "Total pressure, measured turbo speed and setpoint; all readings. Grey spans are settle periods, excluded."))
+```
+:::
+
+::: {.content-visible unless-format="html"}
+```{python}
+show((rf.turbo_timeseries_static(T),
+      "Total pressure and measured turbo speed as 1-minute means, with the commanded setpoint. Grey spans "
+      "are settle periods, excluded."))
+```
+:::
+
+```{python}
+#| output: asis
+print(rf.turbo_tp_table(T))
+print("\n: Total pressure and pump power by setpoint, settle excluded. {#tbl-tp-by-speed}")
+```
+
+```{python}
+seg = T["mass_stats_by_segment"]
+show((tsa.fig_mass_facets(seg, "torr_mean", "torr_std", "partial pressure (Torr)", log_y=True),
+      "Mean partial pressure (± sd) per mass and hold against setpoint; down and up legs separately."))
+show((tsa.fig_mass_facets(seg, "rsd_pct", None, "RSD (%)", log_y=False, hover_fmt=".3g"),
+      "RSD per mass and hold, including slow drift."))
+show((tsa.fig_rsd(seg, T["rsd_speed_tests"]),
+      "Drift-robust RSD (sd of successive differences / √2, over the hold mean) by mass and hold. p is a "
+      "Brown–Forsythe test for a setpoint effect, Benjamini–Hochberg adjusted across masses."))
+show((tsa.fig_tp(T["tp_by_segment"]), "Total pressure against measured speed, per hold (mean ± sd)."))
+show((tsa.fig_power(T["tp_by_segment"]), "Turbo power against measured speed, per hold (mean ± sd)."))
+show((tsa.fig_noise_vs_signal(seg),
+      "Drift-robust noise and RSD against mean signal, one point per mass and hold, coloured by setpoint, "
+      "with the fitted noise model (floor + shot + proportional)."))
+```
+
+```{python}
+#| output: asis
+print(rf.turbo_noise_floor_table(T))
+print("\n: Signal, noise and RSD at the lowest setpoint relative to the highest, with BH-adjusted p-values "
+      "for a setpoint effect on RSD and on absolute noise. {#tbl-noise-floor}")
+```
+
+Ratios to m/z 40 (Ar), the quantity the flux calculations depend on:
+
+```{python}
+rseg = T["ratio_stats_by_segment"]
+show((tsa.fig_mass_facets(rseg, "ratio_mean", "ratio_std", "signal / m40", log_y=True, hover_fmt=".4g"),
+      "Mean ratio to m/z 40 (± sd) per mass and hold."))
+show((tsa.fig_rsd(rseg, T["ratio_speed_tests"], label="Drift-robust RSD of signal / m40"),
+      "Drift-robust RSD of the ratio to m/z 40, with the setpoint-effect test as above."))
+```
+
+TODO: conclusion, chosen setpoint and why.
+
+## Faraday cup vs CDEM detector
+
+TODO: aim, sequence (FC run, CDEM run), sample, how the analysis windows were chosen.
+
+```{python}
+C = rf.load_cdem()
+show_all(rf.cdem_figs(C))
+```
+
+```{python}
+#| output: asis
+print(rf.cdem_summary_table(C))
+print("\n: CDEM/FC gain, MAD-based scan-to-scan noise (% of mean) and stable-window partial pressure per "
+      "mass. {#tbl-cdem}")
+```
+
+TODO: conclusion, detector choice and gain to use.
+
+# ESL tank tests
+
+TODO: tank set-up, what changed between the small- and large-valve tests. The chamber treatment is
+recorded as `none` in each `deployment.toml`; the notes below describe what was actually in each
+chamber.
+
+## ESL 2026-08-25: small valves, sediment vs water
+
+```{python}
+#| output: asis
+d = D["egcf_esl_2026-08-25"]
+print(rf.deployment_header_md(d))
+```
+
+TODO: what happened in this deployment.
+
+### Data availability and status
+
+```{python}
+show(rf.availability_fig(d))
+show_all(rf.status_figs(d))
+```
+
+### RGA
+
+```{python}
+show_all(rf.rga_figs(d))
+```
+
+### Water
+
+```{python}
+show_all(rf.water_figs(d))
+```
+
+### Fluxes
+
+```{python}
+show(rf.flux_over_time_fig(d))
+```
+
+```{python}
+#| output: asis
+print(rf.flux_summary_table(d))
+print("\n: Flux per experiment and chamber with the linear-fit r² (O₂, N₂, H⁺ in mmol m⁻² h⁻¹; ΔT in °C h⁻¹). n is chamber cycles in the fit. {#tbl-flux-esl-2026-08-25}")
+```
+
+TODO: interpretation.
+
+## ESL 2026-08-28: small valves, sediment vs water + algae
+
+```{python}
+#| output: asis
+d = D["egcf_esl_2026-08-28"]
+print(rf.deployment_header_md(d))
+```
+
+TODO: what happened in this deployment.
+
+### Data availability and status
+
+```{python}
+show(rf.availability_fig(d))
+show_all(rf.status_figs(d))
+```
+
+### RGA
+
+```{python}
+show_all(rf.rga_figs(d))
+```
+
+### Water
+
+```{python}
+show_all(rf.water_figs(d))
+```
+
+### Fluxes
+
+```{python}
+show(rf.flux_over_time_fig(d))
+```
+
+```{python}
+#| output: asis
+print(rf.flux_summary_table(d))
+print("\n: Flux per experiment and chamber with the linear-fit r² (O₂, N₂, H⁺ in mmol m⁻² h⁻¹; ΔT in °C h⁻¹). n is chamber cycles in the fit. {#tbl-flux-esl-2026-08-28}")
+```
+
+TODO: interpretation.
+
+## ESL 2026-09-18: large valves, sediment vs water + algae
+
+```{python}
+#| output: asis
+d = D["egcf_esl_2026-09-18"]
+print(rf.deployment_header_md(d))
+```
+
+TODO: what happened in this deployment.
+
+### Data availability and status
+
+```{python}
+show(rf.availability_fig(d))
+show_all(rf.status_figs(d))
+```
+
+### RGA
+
+```{python}
+show_all(rf.rga_figs(d))
+```
+
+### Water
+
+```{python}
+show_all(rf.water_figs(d))
+```
+
+### Fluxes
+
+```{python}
+show(rf.flux_over_time_fig(d))
+```
+
+```{python}
+#| output: asis
+print(rf.flux_summary_table(d))
+print("\n: Flux per experiment and chamber with the linear-fit r² (O₂, N₂, H⁺ in mmol m⁻² h⁻¹; ΔT in °C h⁻¹). n is chamber cycles in the fit. {#tbl-flux-esl-2026-09-18}")
+```
+
+TODO: interpretation.
+
+## ESL 2026-09-23: large valves, sediment vs water + algae
+
+```{python}
+#| output: asis
+d = D["egcf_esl_2026-09-23"]
+print(rf.deployment_header_md(d))
+```
+
+TODO: what happened in this deployment.
+
+### Data availability and status
+
+```{python}
+show(rf.availability_fig(d))
+show_all(rf.status_figs(d))
+```
+
+### RGA
+
+```{python}
+show_all(rf.rga_figs(d))
+```
+
+### Water
+
+```{python}
+show_all(rf.water_figs(d))
+```
+
+### Fluxes
+
+```{python}
+show(rf.flux_over_time_fig(d))
+```
+
+```{python}
+#| output: asis
+print(rf.flux_summary_table(d))
+print("\n: Flux per experiment and chamber with the linear-fit r² (O₂, N₂, H⁺ in mmol m⁻² h⁻¹; ΔT in °C h⁻¹). n is chamber cycles in the fit. {#tbl-flux-esl-2026-09-23}")
+```
+
+TODO: interpretation.
+
+## Small vs large valves
+
+```{python}
+esl = [D[dep] for dep in ESL]
+show(rf.cross_deployment_flux_fig(esl, LABELS))
+```
+
+```{python}
+#| output: asis
+print(rf.cross_deployment_table(esl, LABELS))
+print("\n: Median flux per tank test and chamber (mmol m⁻² h⁻¹). {#tbl-esl-medians}")
+```
+
+TODO: did the larger valves (~600 vs ~60–100 mL/min) change cycle quality, settle behaviour, or flux
+noise?
+
+# Hadley Harbor field deployments
+
+TODO: site, eelgrass bed, deployment and recovery.
+
+## Hadley Harbor 2026-10-01
+
+```{python}
+#| output: asis
+d = D["egcf_hadley_2026-10-01"]
+print(rf.deployment_header_md(d))
+```
+
+TODO: what happened in this deployment.
+
+### Data availability and status
+
+```{python}
+show(rf.availability_fig(d))
+show_all(rf.status_figs(d))
+```
+
+### RGA
+
+```{python}
+show_all(rf.rga_figs(d))
+```
+
+### Water
+
+```{python}
+show_all(rf.water_figs(d))
+```
+
+### Light
+
+```{python}
+#| output: asis
+print(rf.par_daily_table(d))
+print("\n: Daily light integral and max PAR per UTC day (coverage is the fraction of the day logged). {#tbl-par-hadley-2026-10-01}")
+```
+
+### Metabolism
+
+```{python}
+show(rf.metabolism_fig(d))
+```
+
+```{python}
+#| output: asis
+warning = rf.pi_fit_warning(d)
+if warning:
+    print(warning + "\n")
+print(rf.pi_fit_table(d))
+print("\n: Jassby–Platt fit per chamber (mmol O₂ m⁻² h⁻¹; α per µmol photons m⁻² s⁻¹; Ik in µmol m⁻² s⁻¹). {#tbl-pi-hadley-2026-10-01}")
+print()
+print(rf.metabolism_table(d))
+print("\n: O₂ flux, NCP and GPP per experiment (mmol m⁻² h⁻¹; PAR in µmol m⁻² s⁻¹). {#tbl-metab-hadley-2026-10-01}")
+```
+
+TODO: is the P–I fit constrained (number of light points, does Pmax/Ik make sense)?
+
+### Fluxes
+
+```{python}
+show(rf.flux_over_time_fig(d))
+```
+
+```{python}
+#| output: asis
+print(rf.flux_summary_table(d))
+print("\n: Flux per experiment and chamber with the linear-fit r² (O₂, N₂, H⁺ in mmol m⁻² h⁻¹; ΔT in °C h⁻¹). n is chamber cycles in the fit. {#tbl-flux-hadley-2026-10-01}")
+```
+
+TODO: interpretation.
+
+## Hadley Harbor 2026-10-13
+
+```{python}
+#| output: asis
+d = D["egcf_hadley_2026-10-13"]
+print(rf.deployment_header_md(d))
+```
+
+TODO: what happened in this deployment.
+
+### Data availability and status
+
+```{python}
+show(rf.availability_fig(d))
+show_all(rf.status_figs(d))
+```
+
+### RGA
+
+```{python}
+show_all(rf.rga_figs(d))
+```
+
+### Water
+
+```{python}
+show_all(rf.water_figs(d))
+```
+
+### Light
+
+```{python}
+#| output: asis
+print(rf.par_daily_table(d))
+print("\n: Daily light integral and max PAR per UTC day (coverage is the fraction of the day logged). {#tbl-par-hadley-2026-10-13}")
+```
+
+### Metabolism
+
+```{python}
+show(rf.metabolism_fig(d))
+```
+
+```{python}
+#| output: asis
+warning = rf.pi_fit_warning(d)
+if warning:
+    print(warning + "\n")
+print(rf.pi_fit_table(d))
+print("\n: Jassby–Platt fit per chamber (mmol O₂ m⁻² h⁻¹; α per µmol photons m⁻² s⁻¹; Ik in µmol m⁻² s⁻¹). {#tbl-pi-hadley-2026-10-13}")
+print()
+print(rf.metabolism_table(d))
+print("\n: O₂ flux, NCP and GPP per experiment (mmol m⁻² h⁻¹; PAR in µmol m⁻² s⁻¹). {#tbl-metab-hadley-2026-10-13}")
+```
+
+TODO: is the P–I fit constrained (number of light points, does Pmax/Ik make sense)?
+
+### Fluxes
+
+```{python}
+show(rf.flux_over_time_fig(d))
+```
+
+```{python}
+#| output: asis
+print(rf.flux_summary_table(d))
+print("\n: Flux per experiment and chamber with the linear-fit r² (O₂, N₂, H⁺ in mmol m⁻² h⁻¹; ΔT in °C h⁻¹). n is chamber cycles in the fit. {#tbl-flux-hadley-2026-10-13}")
+```
+
+TODO: interpretation.
+
+## All deployments
+
+```{python}
+show(rf.cross_deployment_flux_fig(list(D.values()), LABELS))
+```
+
+```{python}
+#| output: asis
+print(rf.cross_deployment_table(list(D.values()), LABELS))
+print("\n: Median flux per deployment and chamber (mmol m⁻² h⁻¹). {#tbl-all-medians}")
+```
+
+# Discussion and next steps
+
+TODO: chamber anchoring/erosion, battery capacity, line leakage between chambers, valve size,
+detector and turbo settings for the next deployment, PAR inside the chambers (transmittance is
+unmeasured, 1.0).
